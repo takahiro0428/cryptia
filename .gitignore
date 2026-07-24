@@ -13,3 +13,7 @@ node_modules/
 # ログ・一時ファイル
 *.log
 tmp/
+
+# Nitro firebase プリセットがビルド時に自動生成するテンプレート（正は ルートの firebase.json）
+app/firebase.json
+app/.firebaserc
