@@ -179,6 +179,8 @@ jobs:
           NUXT_PUBLIC_FIREBASE_APP_ID: ${{ vars.NUXT_PUBLIC_FIREBASE_APP_ID }}
           NUXT_VERTEX_LOCATION: ${{ vars.NUXT_VERTEX_LOCATION }}
           NUXT_VERTEX_MODEL: ${{ vars.NUXT_VERTEX_MODEL }}
+          # AI API レートリミットの信頼プロキシホップ数（deploy-firebase.sh が Functions の .env へ書き出す）
+          NUXT_TRUSTED_PROXY_HOPS: ${{ vars.NUXT_TRUSTED_PROXY_HOPS }}
         run: bash scripts/run-test-stage.sh "デプロイ" deploy
 
       - name: デプロイログをアーティファクトとして保存

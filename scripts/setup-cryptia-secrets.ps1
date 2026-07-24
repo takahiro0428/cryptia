@@ -52,6 +52,11 @@
 .PARAMETER VertexModel
     Vertex AI のモデル名（既定: gemini-2.0-flash）。
 
+.PARAMETER TrustedProxyHops
+    AI API レートリミットが X-Forwarded-For の右端から数える信頼ホップ数（既定: 1）。
+    デプロイ後に Cloud Logging で実際の X-Forwarded-For を確認し、
+    実クライアント IP の位置に合わせて調整する（deploy-guide.md §3 参照）。
+
 .EXAMPLE
     .\scripts\setup-cryptia-secrets.ps1 -ProjectId "my-cryptia-prod" -ServiceAccountJsonPath "C:\keys\sa.json"
 
@@ -69,7 +74,8 @@ param(
     [string]$FirebaseAuthDomain = "",
     [string]$FirebaseAppId = "",
     [string]$VertexLocation = "asia-northeast1",
-    [string]$VertexModel = "gemini-2.0-flash"
+    [string]$VertexModel = "gemini-2.0-flash",
+    [string]$TrustedProxyHops = "1"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -171,6 +177,7 @@ Write-Host ""
 Write-Host "[repository variables: アプリ設定（公開可能な識別子）]"
 Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_VERTEX_LOCATION' -Value $VertexLocation
 Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_VERTEX_MODEL' -Value $VertexModel
+Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_TRUSTED_PROXY_HOPS' -Value $TrustedProxyHops
 if ($FirebaseApiKey -ne "") {
     Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_PUBLIC_FIREBASE_API_KEY' -Value $FirebaseApiKey
     Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_PUBLIC_FIREBASE_PROJECT_ID' -Value $ProjectId
