@@ -1,0 +1,304 @@
+/* ============================================================
+   Cryptia デザインシステム
+   ダークテーマ基調のトレーディング UI。320px〜のレスポンシブ対応（原則8）。
+   ============================================================ */
+
+:root {
+  --bg: #0b1020;
+  --bg-elev: #121a30;
+  --bg-elev2: #1a2440;
+  --border: #26304f;
+  --text: #e8ecf8;
+  --text-dim: #93a0c2;
+  --text-faint: #5c6a8f;
+  --accent: #4f7cff;
+  --accent-soft: rgba(79, 124, 255, 0.14);
+  --up: #22c58b;
+  --up-soft: rgba(34, 197, 139, 0.14);
+  --down: #f0506e;
+  --down-soft: rgba(240, 80, 110, 0.14);
+  --warn: #f5a623;
+  --warn-soft: rgba(245, 166, 35, 0.14);
+  --gold: #d4af37;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --nav-h: 60px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --font: 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', system-ui, sans-serif;
+  --mono: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none;
+}
+
+h1, h2, h3 { margin: 0 0 0.5em; font-weight: 700; }
+h1 { font-size: 1.35rem; }
+h2 { font-size: 1.1rem; }
+h3 { font-size: 0.95rem; }
+p { margin: 0 0 0.75em; }
+a { color: var(--accent); text-decoration: none; }
+button { font-family: inherit; }
+
+/* ---- レイアウト ---- */
+.app-shell { display: flex; min-height: 100dvh; }
+.app-main {
+  flex: 1;
+  min-width: 0;
+  padding: 16px 16px calc(var(--nav-h) + var(--safe-bottom) + 20px);
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ---- カード ---- */
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.card + .card { margin-top: 12px; }
+.card-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.card-title h2 { margin: 0; }
+
+/* ---- グリッド ---- */
+.grid { display: grid; gap: 12px; }
+.grid-cards { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+.grid-2 { grid-template-columns: 1fr; }
+
+/* ---- ボタン ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elev2);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.05s;
+  min-height: 40px; /* タップターゲット確保（モバイル操作感） */
+}
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-danger { background: var(--down); border-color: var(--down); color: #fff; }
+.btn-success { background: var(--up); border-color: var(--up); color: #04160f; }
+.btn-ghost { background: transparent; }
+.btn-sm { padding: 5px 10px; min-height: 32px; font-size: 0.8rem; }
+
+/* ---- フォーム ---- */
+.input, select.input, textarea.input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px; /* iOS ズーム防止 */
+  font-family: inherit;
+}
+.input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+label.field { display: block; margin-bottom: 12px; }
+label.field > span { display: block; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
+
+/* ---- テキストユーティリティ ---- */
+.up { color: var(--up); }
+.down { color: var(--down); }
+.dim { color: var(--text-dim); }
+.faint { color: var(--text-faint); }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.small { font-size: 0.8rem; }
+.xs { font-size: 0.72rem; }
+.bold { font-weight: 700; }
+.center { text-align: center; }
+.nowrap { white-space: nowrap; }
+
+/* ---- バッジ / タグ ---- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--bg-elev2);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.badge-up { background: var(--up-soft); color: var(--up); }
+.badge-down { background: var(--down-soft); color: var(--down); }
+.badge-warn { background: var(--warn-soft); color: var(--warn); }
+.badge-accent { background: var(--accent-soft); color: var(--accent); }
+
+/* ---- タブ ---- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.tabs .tab {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  min-height: 36px;
+}
+.tabs .tab.active { background: var(--accent); color: #fff; }
+
+/* ---- テーブル（PC）→ カード化はコンポーネント側で切替（原則8） ---- */
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+table.data th {
+  text-align: left;
+  color: var(--text-faint);
+  font-weight: 600;
+  font-size: 0.72rem;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+table.data td { padding: 8px; border-bottom: 1px solid var(--border); }
+table.data tr:last-child td { border-bottom: none; }
+
+/* ---- ナビゲーション ---- */
+.nav-desktop { display: none; }
+.nav-mobile {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  height: calc(var(--nav-h) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  background: rgba(13, 18, 36, 0.92);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--border);
+  display: flex;
+  z-index: 100;
+}
+.nav-mobile a {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--text-faint);
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+.nav-mobile a .icon { font-size: 1.25rem; line-height: 1; }
+.nav-mobile a.nav-active { color: var(--accent); }
+
+/* ---- 通知トースト ---- */
+.toast-region {
+  position: fixed;
+  top: 12px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(94vw, 420px);
+}
+.toast {
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.toast.error { border-left-color: var(--down); }
+.toast.warn { border-left-color: var(--warn); }
+
+/* ---- 免責バナー ---- */
+.disclaimer {
+  background: var(--warn-soft);
+  border: 1px solid rgba(245, 166, 35, 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--warn);
+  font-size: 0.78rem;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+/* ---- スケルトン ---- */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-elev) 25%, var(--bg-elev2) 50%, var(--bg-elev) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* ============ PC（768px〜）: サイドナビ表示 ============ */
+@media (min-width: 768px) {
+  .app-main { padding: 24px 28px 40px; }
+  .nav-mobile { display: none; }
+  .nav-desktop {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 220px;
+    flex-shrink: 0;
+    padding: 20px 12px;
+    border-right: 1px solid var(--border);
+    background: var(--bg-elev);
+    position: sticky;
+    top: 0;
+    height: 100dvh;
+    overflow-y: auto;
+  }
+  .nav-desktop .brand {
+    font-size: 1.2rem;
+    font-weight: 800;
+    padding: 4px 12px 16px;
+    letter-spacing: 0.02em;
+  }
+  .nav-desktop .brand span { color: var(--accent); }
+  .nav-desktop a {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .nav-desktop a:hover { background: var(--bg-elev2); }
+  .nav-desktop a.nav-active { background: var(--accent-soft); color: var(--accent); }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+}

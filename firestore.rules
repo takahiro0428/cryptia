@@ -1,0 +1,33 @@
+rules_version = '2';
+
+// Cryptia Firestore Security Rules
+// SoT: クライアント操作結果（ローカル）→ users/{uid}/state はその同期キャッシュ。
+// 匿名認証の uid 単位で自分のデータのみ読み書き可能（Phase 3: ユーザー権限）。
+//
+// 注意（CLAUDE.md Firestore 確認ポイント）:
+// - read（get/list）では request.resource が存在しないため、read と write の
+//   条件は必ず分離する（混在させるとルール評価エラー = 全 read 拒否になる）
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid}/state/{stateKey} {
+      // 読み取り・削除: 本人のみ
+      allow read, delete: if request.auth != null && request.auth.uid == uid;
+
+      // 作成・更新: 本人 + アプリが使用する stateKey のみ + スキーマ厳格検証
+      // （任意キーの量産・巨大ドキュメントによるストレージ濫用を防ぐ: AUDIT-3）
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        && stateKey in ['demo-trade', 'solana-degen', 'strategies', 'trade-guard', 'live-trade-log']
+        && request.resource.data.keys().hasOnly(['savedAt', 'json'])
+        && request.resource.data.keys().hasAll(['savedAt', 'json'])
+        && request.resource.data.savedAt is number
+        && request.resource.data.json is string
+        && request.resource.data.json.size() < 262144;
+    }
+
+    // 上記以外へのアクセスはすべて拒否
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -167,11 +167,20 @@ jobs:
           DEPLOY_TARGET: ${{ secrets.DEPLOY_TARGET }}
           DEPLOY_ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
           # --- プロジェクト固有のシークレットはここに追加する ---
-          # 例: FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           # 例: AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           # 追加したシークレット名は SCRUB_SECRET_NAMES にも列挙すること
           # （ログ・サマリー保存前に値が *** へ置換される。deploy-guide.md §7 参照）
           SCRUB_SECRET_NAMES: DEPLOY_TOKEN DEPLOY_TARGET
+          # --- Cryptia アプリのビルド時設定（公開可能な識別子。repository variables で管理） ---
+          # 登録は scripts/setup-cryptia-secrets.ps1（deploy-guide.md §4 参照）
+          NUXT_PUBLIC_FIREBASE_API_KEY: ${{ vars.NUXT_PUBLIC_FIREBASE_API_KEY }}
+          NUXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ vars.NUXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
+          NUXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ vars.NUXT_PUBLIC_FIREBASE_PROJECT_ID }}
+          NUXT_PUBLIC_FIREBASE_APP_ID: ${{ vars.NUXT_PUBLIC_FIREBASE_APP_ID }}
+          NUXT_VERTEX_LOCATION: ${{ vars.NUXT_VERTEX_LOCATION }}
+          NUXT_VERTEX_MODEL: ${{ vars.NUXT_VERTEX_MODEL }}
+          # AI API レートリミットの信頼プロキシホップ数（deploy-firebase.sh が Functions の .env へ書き出す）
+          NUXT_TRUSTED_PROXY_HOPS: ${{ vars.NUXT_TRUSTED_PROXY_HOPS }}
         run: bash scripts/run-test-stage.sh "デプロイ" deploy
 
       - name: デプロイログをアーティファクトとして保存

@@ -43,7 +43,13 @@ if [ -z "${STAGE_CMD:-}" ]; then
   exit 1
 fi
 
-# SCRUB_SECRET_NAMES に列挙された環境変数の値を *** に置換する
+# SCRUB_SECRET_NAMES に列挙された環境変数の値を *** に置換する。
+# 完全一致だけでは JSON シークレット（サービスアカウントキー）の断片や
+# 派生トークンを除去できないため、パターンベースの除去も併用する:
+#   - OAuth アクセストークン（ya29.…）
+#   - JSON 内の private_key / private_key_id フィールド値
+#   - サービスアカウントのメールアドレス
+#   - 生出力された PEM 秘密鍵ブロック（行範囲ごと削除）
 scrub_secrets() {
   local text="$1" name value
   for name in ${SCRUB_SECRET_NAMES:-DEPLOY_TOKEN DEPLOY_TARGET}; do
@@ -52,7 +58,11 @@ scrub_secrets() {
       text="${text//"$value"/***}"
     fi
   done
-  printf '%s' "$text"
+  printf '%s' "$text" | sed -E \
+    -e 's/ya29\.[A-Za-z0-9._-]+/***/g' \
+    -e 's/"private_key(_id)?"[[:space:]]*:[[:space:]]*"[^"]*"/"private_key\1":"***"/g' \
+    -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.iam\.gserviceaccount\.com/***/g' \
+    -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/d'
 }
 
 mkdir -p "$LOG_DIR"
