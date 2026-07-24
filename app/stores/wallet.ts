@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { CryptiaError, ERROR_CODES, formatError } from '~/shared/errors'
 import { assertTradeAllowed, canEnableAutoTrade, DEFAULT_GUARD } from '~/shared/tradeGuard'
 import type { TradeGuardConfig } from '~/shared/types'
-import { persist, restore } from '~/composables/usePersistence'
+import { loadLocal, persist, restore } from '~/composables/usePersistence'
 import { useUiStore } from '~/stores/ui'
 
 const GUARD_KEY = 'trade-guard'
@@ -186,11 +186,22 @@ export const useWalletStore = defineStore('wallet', {
       if (!phantom || !this.connected || !this.publicKey) {
         throw new CryptiaError(ERROR_CODES.WALLET_NOT_CONNECTED, 'ウォレットが接続されていません', false)
       }
-      // 安全ガード（BR-2）: 同意・上限を検証。当日消費は取引ログの概算 USD 合計
-      assertTradeAllowed(this.guard, meta.approxUsd, this.todaysSpentUsd, { auto: meta.auto })
-
+      // 並行実行ガード: 署名待ちの間の重複注文で日次上限の判定が古くなるのを防ぐ（AUDIT-7）
+      if (this.busy) {
+        throw new CryptiaError(
+          ERROR_CODES.TRADE_GUARD_BLOCKED,
+          '別の注文を処理中です。完了を待ってから再試行してください',
+        )
+      }
       this.busy = true
       try {
+        // 他タブが約定させたログを取り込んでから日次消費を判定する（AUDIT-7）
+        const latest = loadLocal<LiveTradeRecord[]>(LOG_KEY)
+        if (latest && latest.data.length > this.tradeLog.length) {
+          this.tradeLog = latest.data
+        }
+        // 安全ガード（BR-2）: 同意・上限を検証。当日消費は取引ログの概算 USD 合計
+        assertTradeAllowed(this.guard, meta.approxUsd, this.todaysSpentUsd, { auto: meta.auto })
         const res = await fetch(JUPITER_SWAP_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -240,6 +251,37 @@ export const useWalletStore = defineStore('wallet', {
         throw err
       } finally {
         this.busy = false
+      }
+    },
+    /**
+     * 実トレードログの JSON エクスポート（AUDIT-9）。
+     * 匿名認証のため端末データ消去で履歴が失われる制約への自衛手段。
+     */
+    exportLog(): string {
+      return JSON.stringify({ exportedAt: Date.now(), tradeLog: this.tradeLog }, null, 2)
+    },
+    /** エクスポート JSON の取り込み。txid で重複排除し追記のみ（BR-7）。取込件数を返す */
+    importLog(json: string): number {
+      try {
+        const parsed = JSON.parse(json) as { tradeLog?: LiveTradeRecord[] }
+        if (!Array.isArray(parsed.tradeLog)) return 0
+        const known = new Set(this.tradeLog.map((t) => t.txid))
+        const added = parsed.tradeLog.filter(
+          (t) =>
+            t &&
+            typeof t.txid === 'string' &&
+            typeof t.at === 'number' &&
+            !known.has(t.txid),
+        )
+        if (added.length > 0) {
+          this.tradeLog = [...added, ...this.tradeLog]
+            .sort((a, b) => b.at - a.at)
+            .slice(0, 200)
+          persist(LOG_KEY, JSON.parse(JSON.stringify(this.tradeLog)))
+        }
+        return added.length
+      } catch {
+        return 0
       }
     },
   },

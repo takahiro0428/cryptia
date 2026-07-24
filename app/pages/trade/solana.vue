@@ -151,7 +151,10 @@ useHead({ title: 'Solana魔界 | Cryptia' })
       </div>
 
       <h3 style="margin-top: 14px">約定・イベント履歴</h3>
-      <OrderList :orders="solana.portfolio.orders" />
+      <OrderList
+        :orders="solana.portfolio.orders"
+        :symbol-resolver="(addr) => solana.tokenOf(addr)?.baseSymbol"
+      />
     </section>
 
     <!-- 過去セッション -->

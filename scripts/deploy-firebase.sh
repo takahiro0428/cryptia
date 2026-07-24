@@ -50,8 +50,10 @@ echo "▶ Functions ランタイム設定を生成"
 } > app/.output/server/.env
 
 # --- デプロイ ---
+# バージョンは完全固定する（SA キーを扱う環境でのサプライチェーン対策。
+# 更新は PR レビュー経由で行うこと）
 echo "▶ Firebase デプロイ（project: $DEPLOY_TARGET）"
-npx --yes firebase-tools@14 deploy \
+npx --yes firebase-tools@14.27.0 deploy \
   --project "$DEPLOY_TARGET" \
   --only hosting,functions,firestore:rules \
   --non-interactive --force

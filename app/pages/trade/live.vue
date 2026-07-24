@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { formatError } from '~/shared/errors'
+import { ERROR_CODES, formatError } from '~/shared/errors'
 import { fmtTime, fmtUsd } from '~/shared/format'
 import { canEnableAutoTrade } from '~/shared/tradeGuard'
 import type { TradeDecision } from '~/shared/types'
@@ -37,8 +37,22 @@ const solPriceUsd = computed(() => market.tickerOf('solana')?.priceUsd ?? 0)
 const approxUsd = computed(() => amountSol.value * solPriceUsd.value)
 const guardReady = computed(() => canEnableAutoTrade(wallet.guard))
 
-// AI おすすめ（Solana スクリーナーの適格上位）
-const aiPicks = computed(() => solana.recommended.slice(0, 4))
+// 価格の信頼性判定（AUDIT-1）: モック価格・鮮度切れの間は実トレードを全停止する。
+// モック/古い価格で上限ガードの USD 換算を行うと、実勢との乖離分だけ上限超過の
+// 実資金スワップが通過してしまうため。
+const PRICE_STALE_MS = 2 * 60 * 1000
+const nowTick = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | null = null
+const priceReady = computed(
+  () =>
+    !market.usingMockData &&
+    solPriceUsd.value > 0 &&
+    nowTick.value - market.lastUpdatedAt < PRICE_STALE_MS,
+)
+
+// AI おすすめ（Solana スクリーナーの適格上位）。
+// モックデータ表示中は実在しないトークンを実資金画面に出さない（AUDIT-4 / ISSUE-4）
+const aiPicks = computed(() => (solana.usingMockData ? [] : solana.recommended.slice(0, 4)))
 
 function pickKnown(mint: string, symbol: string) {
   outMint.value = mint
@@ -49,7 +63,20 @@ function pickRecommended(mint: string, symbol: string) {
   pickKnown(mint, symbol)
 }
 
+function assertPriceReady(): boolean {
+  if (!priceReady.value) {
+    ui.notify(
+      '実勢価格を取得できないため注文を一時停止しています（価格接続の回復をお待ちください）',
+      'error',
+      ERROR_CODES.TRADE_GUARD_BLOCKED,
+    )
+    return false
+  }
+  return true
+}
+
 async function fetchQuote() {
+  if (!assertPriceReady()) return
   quoting.value = true
   quote.value = null
   try {
@@ -65,6 +92,7 @@ async function fetchQuote() {
 
 async function confirmSwap() {
   if (!quote.value) return
+  if (!assertPriceReady()) return
   showConfirm.value = false
   try {
     await wallet.executeSwap(quote.value, {
@@ -83,6 +111,7 @@ async function confirmSwap() {
 
 /** AI に判断させる（選択中のスクリーナートークンに対して） */
 async function askAi() {
+  if (!assertPriceReady()) return
   const pick = aiPicks.value.find((s) => s.token.baseAddress === outMint.value) ?? aiPicks.value[0]
   if (!pick) {
     ui.notify('AI が評価できる適格トークンがありません', 'warn')
@@ -113,11 +142,35 @@ async function askAi() {
 
 const explorerUrl = (txid: string) => `https://solscan.io/tx/${txid}`
 
+/** 取引履歴の JSON エクスポート（AUDIT-9: 匿名認証のデータ全損リスクへの自衛手段） */
+function exportLog() {
+  const blob = new Blob([wallet.exportLog()], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `cryptia-trade-log-${new Date().toISOString().slice(0, 10)}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+const importInput = ref<HTMLInputElement | null>(null)
+async function importLog(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  const added = wallet.importLog(await file.text())
+  ui.notify(added > 0 ? `${added} 件の取引履歴を取り込みました` : '取り込める新しい履歴がありませんでした')
+  if (importInput.value) importInput.value.value = ''
+}
+
 onMounted(async () => {
   await strategy.restoreState()
   await wallet.restoreState()
   await solana.restoreState()
   if (solana.tokens.length === 0) await solana.fetchTokens()
+  nowTimer = setInterval(() => (nowTick.value = Date.now()), 15_000)
+})
+onBeforeUnmount(() => {
+  if (nowTimer) clearInterval(nowTimer)
 })
 useHead({ title: '実トレード | Cryptia' })
 </script>
@@ -129,6 +182,15 @@ useHead({ title: '実トレード | Cryptia' })
       <span class="badge badge-warn">実資金</span>
     </div>
     <DisclaimerBanner :always="true" />
+
+    <!-- 価格接続の異常時は実トレードを全停止する（AUDIT-1） -->
+    <div v-if="!priceReady" class="disclaimer" role="alert">
+      ⚠️ 実勢価格を取得できないため、実トレード（見積り・発注・AI判断）を一時停止しています。
+      価格接続の回復後に自動で再開します。
+    </div>
+    <div v-if="solana.usingMockData" class="disclaimer" role="alert">
+      ⚠️ DexScreener に接続できないため、AI おすすめトークンは表示されません（参考データを実資金取引に使用しないための保護です）。
+    </div>
 
     <!-- ウォレット接続 -->
     <section class="card">
@@ -258,12 +320,17 @@ useHead({ title: '実トレード | Cryptia' })
         <button
           class="btn btn-primary"
           type="button"
-          :disabled="!wallet.connected || quoting || amountSol <= 0"
+          :disabled="!wallet.connected || quoting || amountSol <= 0 || !priceReady"
           @click="fetchQuote"
         >
           {{ quoting ? '見積り取得中…' : '見積りを取得' }}
         </button>
-        <button class="btn" type="button" :disabled="!wallet.connected || aiThinking" @click="askAi">
+        <button
+          class="btn"
+          type="button"
+          :disabled="!wallet.connected || aiThinking || !priceReady"
+          @click="askAi"
+        >
           {{ aiThinking ? 'AI 分析中…' : '🤖 AI に判断させる' }}
         </button>
       </div>
@@ -302,8 +369,19 @@ useHead({ title: '実トレード | Cryptia' })
     <section class="card">
       <div class="card-title">
         <h2>実トレード履歴</h2>
-        <span class="xs faint">{{ wallet.tradeLog.length }} 件</span>
+        <div style="display: flex; gap: 6px; align-items: center">
+          <span class="xs faint">{{ wallet.tradeLog.length }} 件</span>
+          <button class="btn btn-sm btn-ghost" type="button" :disabled="wallet.tradeLog.length === 0" @click="exportLog">
+            ⬇ 保存
+          </button>
+          <button class="btn btn-sm btn-ghost" type="button" @click="importInput?.click()">⬆ 復元</button>
+          <input ref="importInput" type="file" accept="application/json" hidden @change="importLog" />
+        </div>
       </div>
+      <p class="xs faint">
+        履歴は匿名 ID に紐づくため、ブラウザのサイトデータ消去や端末変更で参照できなくなります。
+        「⬇ 保存」で定期的にバックアップしてください（オンチェーンの原本は Solscan で確認できます）。
+      </p>
       <p v-if="wallet.tradeLog.length === 0" class="dim small">まだ実トレードはありません</p>
       <div v-for="t in wallet.tradeLog.slice(0, 30)" :key="t.txid" class="log-row small">
         <span class="xs faint nowrap">{{ fmtTime(t.at) }}</span>

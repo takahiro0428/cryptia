@@ -95,6 +95,53 @@ describe('デモトレードエンジン（shared/tradeEngine）', () => {
     expect(s.tradeCount).toBe(2)
   })
 
+  it('複数回の買い増し後の全量売却が数量指定で誤差なく成立する（ISSUE-2 回帰）', () => {
+    // notional 逆算では fl(fl(q*p)/p) ≠ q となり INSUFFICIENT_POSITION が出る経路
+    let p = createPortfolio(10_000)
+    const prices = [3.7, 5.3, 4.1, 6.9, 5.7]
+    for (const priceUsd of prices) {
+      p = executeOrder(p, { ...base, assetId: 'solana', side: 'buy', notionalUsd: 333.33, priceUsd }).portfolio
+    }
+    const pos = p.positions[0]
+    const { portfolio: after } = executeOrder(p, {
+      ...base,
+      assetId: 'solana',
+      side: 'sell',
+      quantity: pos.quantity, // 全量売却
+      priceUsd: 6.1,
+    })
+    expect(after.positions).toHaveLength(0) // ダストが残らない
+  })
+
+  it('マイクロプライス銘柄（1e-8 USD）でも全量売却でダストが残らない（ISSUE-2 回帰）', () => {
+    let p = createPortfolio(1_000)
+    p = executeOrder(p, { ...base, assetId: 'PAIRX', side: 'buy', notionalUsd: 100, priceUsd: 3.33e-8 }).portfolio
+    p = executeOrder(p, { ...base, assetId: 'PAIRX', side: 'buy', notionalUsd: 55.5, priceUsd: 7.77e-8 }).portfolio
+    const pos = p.positions[0]
+    expect(pos.quantity).toBeGreaterThan(1e9) // 数量は 10 億単位
+    const { portfolio: after } = executeOrder(p, {
+      ...base,
+      assetId: 'PAIRX',
+      side: 'sell',
+      quantity: pos.quantity,
+      priceUsd: 5e-8,
+    })
+    expect(after.positions).toHaveLength(0)
+  })
+
+  it('許容誤差内の数量超過は全量売却に丸められ、許容外は拒否される', () => {
+    let p = createPortfolio(1_000)
+    p = executeOrder(p, { ...base, assetId: 'solana', side: 'buy', notionalUsd: 300, priceUsd: 150 }).portfolio
+    const qty = p.positions[0].quantity
+    // 相対 1e-9 以内の超過 → 丸めて成立
+    const ok = executeOrder(p, { ...base, assetId: 'solana', side: 'sell', quantity: qty * (1 + 1e-12), priceUsd: 150 })
+    expect(ok.portfolio.positions).toHaveLength(0)
+    // 明確な超過 → 拒否
+    expect(() =>
+      executeOrder(p, { ...base, assetId: 'solana', side: 'sell', quantity: qty * 1.001, priceUsd: 150 }),
+    ).toThrowError(expect.objectContaining({ code: ERROR_CODES.INSUFFICIENT_POSITION }))
+  })
+
   it('checkLadder: +100% で 50% 利確ルールが発動し、発動済みは再発動しない', () => {
     const fired = checkLadder(1, 2.1, DEFAULT_LADDER_RULES, [])
     expect(fired).toHaveLength(1)

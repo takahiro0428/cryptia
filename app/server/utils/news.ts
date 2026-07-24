@@ -10,6 +10,18 @@ import type { NewsItem } from '~/shared/types'
 const CACHE_TTL_MS = 5 * 60 * 1000
 let cache: { items: NewsItem[]; fetchedAt: number } = { items: [], fetchedAt: 0 }
 
+/** タイトルの無害化: 制御文字を除去し長さを制限（XSS・プロンプト注入の低減: AUDIT-6） */
+function sanitizeTitle(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)
+}
+
+/** URL の無害化: https 以外（javascript: 等）は破棄する（AUDIT-6） */
+function sanitizeUrl(raw: string): string {
+  const trimmed = raw.trim()
+  return /^https:\/\//i.test(trimmed) ? trimmed.slice(0, 2000) : ''
+}
+
 /** RSS 2.0 の <item> を最小限パースする（外部 XML パーサ依存を避ける） */
 export function parseRssItems(xml: string, source: string, limit = 10): NewsItem[] {
   const items: NewsItem[] = []
@@ -21,8 +33,8 @@ export function parseRssItems(xml: string, source: string, limit = 10): NewsItem
         block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`))
       return m?.[1]?.trim() ?? ''
     }
-    const title = pick('title')
-    const link = pick('link')
+    const title = sanitizeTitle(pick('title'))
+    const link = sanitizeUrl(pick('link'))
     const pubDate = pick('pubDate')
     if (!title) continue
     items.push({

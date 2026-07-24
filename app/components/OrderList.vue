@@ -4,11 +4,22 @@ import { fmtQty, fmtTime, fmtUsd } from '~/shared/format'
 import type { Order } from '~/shared/types'
 
 // 注文履歴。PC はテーブル、モバイルはカード表示に切替える（原則8）
-const props = withDefaults(defineProps<{ orders: Order[]; limit?: number }>(), { limit: 50 })
+const props = withDefaults(
+  defineProps<{
+    orders: Order[]
+    limit?: number
+    /** 銘柄マスタ外の assetId（Solana ペアアドレス等）をシンボルへ解決する（ISSUE-6） */
+    symbolResolver?: (assetId: string) => string | undefined
+  }>(),
+  { limit: 50, symbolResolver: undefined },
+)
 
 const shown = computed(() => [...props.orders].reverse().slice(0, props.limit))
 function symbolOf(assetId: string) {
-  return ASSET_MAP[assetId]?.symbol ?? assetId
+  const resolved = props.symbolResolver?.(assetId) ?? ASSET_MAP[assetId]?.symbol
+  if (resolved) return resolved
+  // 未解決の長い ID（ペアアドレス等）はレイアウトを壊さないよう短縮表示
+  return assetId.length > 12 ? `${assetId.slice(0, 8)}…` : assetId
 }
 </script>
 
@@ -90,7 +101,7 @@ function symbolOf(assetId: string) {
   border-radius: var(--radius-sm);
   padding: 10px 12px;
 }
-.row1 { display: flex; align-items: center; gap: 8px; }
+.row1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .row1 span:last-child { margin-left: auto; }
 .row2 { display: flex; gap: 10px; margin: 3px 0; }
 @media (min-width: 768px) {

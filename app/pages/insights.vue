@@ -99,7 +99,9 @@ useHead({ title: 'AI分析 | Cryptia' })
       </div>
       <ul v-if="insights.news.length > 0" class="news-list">
         <li v-for="(n, i) in insights.news.slice(0, 10)" :key="i">
-          <a :href="n.url" target="_blank" rel="noopener noreferrer">{{ n.title }}</a>
+          <!-- https のみリンク化（フィード汚染による javascript: URL 対策） -->
+          <a v-if="n.url.startsWith('https://')" :href="n.url" target="_blank" rel="noopener noreferrer">{{ n.title }}</a>
+          <span v-else>{{ n.title }}</span>
           <span class="xs faint">{{ n.source }} ・ {{ fmtAgo(n.publishedAt) }}</span>
         </li>
       </ul>

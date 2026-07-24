@@ -11,6 +11,7 @@
 | CRYPTIA-E201 | Vertex AI 呼び出し失敗 | 認証・API 無効・タイムアウト | フォールバック分析に自動切替（engine:'fallback' 表示） | Functions SA の `roles/aiplatform.user` 権限、`NUXT_GCP_PROJECT_ID` 設定を確認 |
 | CRYPTIA-E202 | AI 応答の解析失敗 | Gemini の JSON 逸脱 | 同上 | 頻発時はモデル/プロンプト見直し（`NUXT_VERTEX_MODEL`） |
 | CRYPTIA-E301 | 入力検証エラー | 不正リクエスト（改竄・バグ） | 該当操作が 400 で拒否 | Cloud Logging でリクエスト内容確認。頻発時は攻撃を疑う |
+| CRYPTIA-E302 | AI API レートリミット超過 | 同一 IP から毎分 20 リクエスト超（濫用・ボット） | 該当 IP の AI 呼び出しが 429 で拒否 | 正常な防御動作。正規ユーザーで頻発する場合は `server/utils/rateLimit.ts` の上限を見直す |
 | CRYPTIA-E401 | デモ: 資金不足 | 残高超過の買い注文 | 注文スキップ（ログのみ） | 正常動作（資金管理ガード） |
 | CRYPTIA-E402 | デモ: 数量不足 | 保有超過の売り注文 | 注文スキップ | 正常動作 |
 | CRYPTIA-E501 | 実トレード: ガード未設定 | リスク同意・上限が未設定のまま注文/自動化 | 注文ブロック | ユーザーに取引ガード設定を案内 |

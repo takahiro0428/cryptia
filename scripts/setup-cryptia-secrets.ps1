@@ -77,12 +77,27 @@ $ErrorActionPreference = 'Stop'
 # 登録失敗を集約する（1件の失敗で全体を止めない: 非ブロッキングエラーハンドリング）
 $Failures = New-Object System.Collections.ArrayList
 
+# ネイティブコマンドの stderr リダイレクトを PS 5.1 で安全に実行するヘルパー。
+# EAP='Stop' 下で 2>&1 / 2>$null を使うと stderr 行が ErrorRecord 化されて
+# NativeCommandError で異常終了するため（PS 5.1 の既知挙動）、
+# 実行中のみ EAP を 'Continue' に退避し、判定は $LASTEXITCODE で行う。
+function Invoke-NativeQuiet {
+    param([scriptblock]$Command)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        return (& $Command)
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 function Test-Prerequisites {
     $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
     if ($null -eq $ghCmd) {
         throw "GitHub CLI (gh) が見つかりません。https://cli.github.com/ からインストールしてください。"
     }
-    gh auth status 2>&1 | Out-Null
+    $null = Invoke-NativeQuiet { gh auth status 2>&1 }
     if ($LASTEXITCODE -ne 0) {
         throw "GitHub CLI が未認証です。'gh auth login' を実行してから再試行してください。"
     }
@@ -91,7 +106,7 @@ function Test-Prerequisites {
 function Resolve-TargetRepo {
     param([string]$RepoArg)
     if ($RepoArg -ne "") { return $RepoArg }
-    $detected = gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>$null
+    $detected = Invoke-NativeQuiet { gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>$null }
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($detected)) {
         throw "リポジトリを自動検出できませんでした。-Repo 'owner/repo' を指定してください。"
     }

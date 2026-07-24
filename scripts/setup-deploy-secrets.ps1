@@ -75,11 +75,24 @@ $VariableKeys = @('UNIT_TEST_CMD', 'INTEGRATION_TEST_CMD', 'SCENARIO_TEST_CMD', 
 # 登録失敗を集約する（1件の失敗で全体を止めない: 非ブロッキングエラーハンドリング）
 $Failures = [System.Collections.Generic.List[string]]::new()
 
+# ネイティブコマンドの stderr リダイレクトを EAP='Stop' 下で安全に実行するヘルパー。
+# stderr 行の ErrorRecord 化による NativeCommandError を避け、判定は $LASTEXITCODE で行う。
+function Invoke-NativeQuiet {
+    param([scriptblock]$Command)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        return (& $Command)
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 function Test-Prerequisites {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Write-Error "GitHub CLI (gh) が見つかりません。https://cli.github.com/ からインストールしてください。"
     }
-    gh auth status 2>&1 | Out-Null
+    $null = Invoke-NativeQuiet { gh auth status 2>&1 }
     if ($LASTEXITCODE -ne 0) {
         Write-Error "GitHub CLI が未認証です。'gh auth login' を実行してから再試行してください。"
     }
@@ -88,7 +101,7 @@ function Test-Prerequisites {
 function Resolve-Repo {
     param([string]$Repo)
     if ($Repo) { return $Repo }
-    $detected = gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>$null
+    $detected = Invoke-NativeQuiet { gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>$null }
     if ($LASTEXITCODE -ne 0 -or -not $detected) {
         Write-Error "リポジトリを自動検出できませんでした。-Repo 'owner/repo' を指定してください。"
     }

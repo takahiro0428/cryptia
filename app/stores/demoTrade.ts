@@ -51,6 +51,8 @@ export const useDemoTradeStore = defineStore('demoTrade', {
     ticking: false,
     restored: false,
     _timer: null as ReturnType<typeof setInterval> | null,
+    /** セッション世代。await 中に終了/再開始された旧ティックの執行を防ぐ（ISSUE-3） */
+    _session: 0,
   }),
   getters: {
     summary(state): PortfolioSummary | null {
@@ -112,6 +114,7 @@ export const useDemoTradeStore = defineStore('demoTrade', {
       try {
         // 既存セッションがあればアーカイブしてから新規開始（進捗の巻き戻し防止: 原則2）
         this.archiveCurrent()
+        this._session++
         this.portfolio = createPortfolio(initialUsd)
         this.assetIds = [...assetIds]
         this.engineMode = engineMode
@@ -126,6 +129,8 @@ export const useDemoTradeStore = defineStore('demoTrade', {
     startTicking() {
       if (this._timer) return
       this.running = true
+      // 再開状態を即時永続化する（リロードで停止状態に巻き戻さない: 原則2）
+      this._persist()
       this._timer = setInterval(() => void this.tick(), TICK_INTERVAL_MS)
       void this.tick()
     },
@@ -151,6 +156,7 @@ export const useDemoTradeStore = defineStore('demoTrade', {
         assetIds: [...this.assetIds],
       })
       this.archives = this.archives.slice(0, 20)
+      this._session++
       this.portfolio = null
     },
     /** セッション終了（停止 + アーカイブ） */
@@ -164,13 +170,14 @@ export const useDemoTradeStore = defineStore('demoTrade', {
     async tick() {
       if (this.ticking || !this.running || !this.portfolio) return
       this.ticking = true
+      const session = this._session
       try {
         const market = useMarketStore()
         const strategyStore = useStrategyStore()
         const strategy = strategyStore.activeDoc
         const prices = market.priceMap
 
-        for (const assetId of this.assetIds) {
+        for (const assetId of [...this.assetIds]) {
           if (!this.portfolio) break
           const ticker = market.tickerOf(assetId)
           if (!ticker || ticker.priceUsd <= 0) continue
@@ -195,6 +202,8 @@ export const useDemoTradeStore = defineStore('demoTrade', {
               // サーバー未達時はローカルロジックにフォールバック（BR-5）
               decision = decideTrade(ticker, { strategy, exposureRatio, unrealizedPct })
             }
+            // await 中にセッションが終了/再開始されていたら旧判断を破棄（ISSUE-3）
+            if (this._session !== session || !this.running || !this.portfolio) return
           } else {
             decision = decideTrade(ticker, { strategy, exposureRatio, unrealizedPct })
           }

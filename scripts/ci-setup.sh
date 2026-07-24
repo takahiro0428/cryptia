@@ -8,8 +8,9 @@
 set -euo pipefail
 
 echo "▶ pnpm セットアップ"
+# バージョンは完全固定（サプライチェーン対策。更新は PR レビュー経由で行う）
 if ! command -v pnpm >/dev/null 2>&1; then
-  npm install -g pnpm@10
+  npm install -g pnpm@10.34.5
 fi
 pnpm --version
 

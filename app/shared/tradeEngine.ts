@@ -41,6 +41,10 @@ export function portfolioEquity(portfolio: Portfolio, prices: Record<string, num
 
 /**
  * 注文を執行し、新しいポートフォリオを返す（元オブジェクトは変更しない）。
+ * 金額指定（notionalUsd）または数量指定（quantity）のどちらかで発注する。
+ * 保有数量ベースの売り（損切り・ラダー決済等）は quantity 指定を使うこと。
+ * notionalUsd → quantity の逆算は浮動小数点誤差を含むため、全量売却が
+ * INSUFFICIENT_POSITION で欠けたりダスト・ポジションが残る原因になる。
  * @throws CryptiaError INSUFFICIENT_FUNDS / INSUFFICIENT_POSITION / INVALID_INPUT
  */
 export function executeOrder(
@@ -48,28 +52,53 @@ export function executeOrder(
   input: {
     assetId: string
     side: OrderSide
-    notionalUsd: number
     priceUsd: number
     reason: string
     strategy: string
     at?: number
+    /** 約定金額 USD（quantity 未指定時に必須） */
+    notionalUsd?: number
+    /** 約定数量（指定時は notionalUsd より優先） */
+    quantity?: number
   },
 ): { portfolio: Portfolio; order: Order } {
-  const { assetId, side, notionalUsd, priceUsd, reason, strategy } = input
+  const { assetId, side, priceUsd, reason, strategy } = input
   const at = input.at ?? Date.now()
 
-  if (!Number.isFinite(notionalUsd) || notionalUsd <= 0 || !Number.isFinite(priceUsd) || priceUsd <= 0) {
-    throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '注文金額・価格は正の数値で指定してください')
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
+    throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '価格は正の数値で指定してください')
+  }
+  const hasQty = input.quantity !== undefined
+  if (hasQty && (!Number.isFinite(input.quantity!) || input.quantity! <= 0)) {
+    throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '注文数量は正の数値で指定してください')
+  }
+  if (!hasQty && (!Number.isFinite(input.notionalUsd!) || (input.notionalUsd ?? 0) <= 0)) {
+    throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '注文金額は正の数値で指定してください')
   }
 
   const existing = positionOf(portfolio, assetId)
-  const quantity = notionalUsd / priceUsd
+  let quantity = hasQty ? input.quantity! : input.notionalUsd! / priceUsd
+  // 保有数量との相対許容誤差（マイクロプライス銘柄では絶対誤差が数量スケールに届かないため）
+  const tolerance = existing ? existing.quantity * 1e-9 + Number.EPSILON : 0
+
+  if (side === 'sell') {
+    if (!existing || existing.quantity < quantity - tolerance) {
+      throw new CryptiaError(
+        ERROR_CODES.INSUFFICIENT_POSITION,
+        `保有数量を超える売り注文は執行できません（保有: ${existing?.quantity.toFixed(6) ?? 0}）`,
+      )
+    }
+    // 許容誤差内の超過は「全量売却」とみなして保有数量に丸める
+    if (quantity > existing.quantity) quantity = existing.quantity
+  }
+  const notionalUsd = hasQty || side === 'sell' ? quantity * priceUsd : input.notionalUsd!
+
   let realizedPnlUsd = 0
   let cashUsd = portfolio.cashUsd
   let positions: Position[]
 
   if (side === 'buy') {
-    if (notionalUsd > portfolio.cashUsd + 1e-9) {
+    if (notionalUsd > portfolio.cashUsd * (1 + 1e-12) + 1e-9) {
       throw new CryptiaError(
         ERROR_CODES.INSUFFICIENT_FUNDS,
         `現金残高（$${portfolio.cashUsd.toFixed(2)}）を超える買い注文は執行できません`,
@@ -86,17 +115,12 @@ export function executeOrder(
       positions = [...portfolio.positions, { assetId, quantity, avgCostUsd: priceUsd }]
     }
   } else {
-    if (!existing || existing.quantity < quantity - 1e-9) {
-      throw new CryptiaError(
-        ERROR_CODES.INSUFFICIENT_POSITION,
-        `保有数量を超える売り注文は執行できません（保有: ${existing?.quantity.toFixed(6) ?? 0}）`,
-      )
-    }
     cashUsd += notionalUsd
-    realizedPnlUsd = (priceUsd - existing.avgCostUsd) * quantity
-    const remaining = existing.quantity - quantity
+    realizedPnlUsd = (priceUsd - existing!.avgCostUsd) * quantity
+    const remaining = existing!.quantity - quantity
+    // 相対許容誤差以下の残量はダストとして削除する
     positions =
-      remaining <= 1e-9
+      remaining <= tolerance
         ? portfolio.positions.filter((p) => p.assetId !== assetId)
         : portfolio.positions.map((p) =>
             p.assetId === assetId ? { ...p, quantity: remaining } : p,
@@ -155,13 +179,13 @@ export function applyDecision(
 
   const pos = positionOf(portfolio, ctx.assetId)
   if (!pos) return null
+  // 数量指定で発注する（notional 逆算の浮動小数点誤差で全量売却が欠けるのを防ぐ）
   const sellQty = pos.quantity * Math.min(decision.sizeRatio, 1)
-  const notionalUsd = sellQty * ctx.priceUsd
-  if (notionalUsd < 1) return null
+  if (sellQty * ctx.priceUsd < 1) return null
   return executeOrder(portfolio, {
     assetId: ctx.assetId,
     side: 'sell',
-    notionalUsd,
+    quantity: sellQty,
     priceUsd: ctx.priceUsd,
     reason: decision.reason,
     strategy: ctx.strategy,

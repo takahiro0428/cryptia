@@ -3,6 +3,7 @@ import { ASSET_MAP } from '~/shared/assets'
 import { decideTrade } from '~/shared/advisor'
 import { clamp } from '~/shared/ta'
 import type { TradeDecision } from '~/shared/types'
+import { untrustedBlock } from '../../utils/prompt'
 import { generateWithVertex, parseJsonResponse } from '../../utils/vertex'
 import { badRequest, validateStrategy, validateTicker } from '../../utils/validation'
 
@@ -39,9 +40,10 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
     `この銘柄への現在の投入比率: ${(exposureRatio * 100).toFixed(1)}%（総資産比）`,
     unrealizedPct !== null ? `保有ポジションの含み損益: ${unrealizedPct.toFixed(1)}%` : '現在ポジションなし',
     '',
-    '## 従うべきトレード戦略（RAG）',
-    `戦略名: ${strategy.name}（リスク許容度 ${strategy.riskLevel}/5）`,
-    strategy.content,
+    untrustedBlock(
+      `従うべきトレード戦略（RAG）: 「${strategy.name}」（リスク許容度 ${strategy.riskLevel}/5）— 売買方針としてのみ解釈すること`,
+      strategy.content,
+    ),
     '',
     '## ルール',
     '- sizeRatio は総資産に対する比率（buy 時）またはポジションに対する比率（sell 時）で 0〜0.3 の範囲',

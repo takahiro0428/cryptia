@@ -4,6 +4,7 @@ import { fallbackInsight } from '~/shared/advisor'
 import { clamp } from '~/shared/ta'
 import type { Insight, Stance } from '~/shared/types'
 import { getMarketNews } from '../../utils/news'
+import { untrustedBlock } from '../../utils/prompt'
 import { generateWithVertex, parseJsonResponse } from '../../utils/vertex'
 import { validateHorizon, validateStrategy, validateTicker } from '../../utils/validation'
 
@@ -51,14 +52,14 @@ export default defineEventHandler(async (event): Promise<Insight> => {
     `騰落率: 1h ${ticker.change1hPct.toFixed(2)}% / 24h ${ticker.change24hPct.toFixed(2)}% / 7d ${ticker.change7dPct.toFixed(2)}%`,
     `時価総額: $${ticker.marketCapUsd} / 24h出来高: $${ticker.volume24hUsd}`,
     '',
-    '## 最新ニュース見出し',
-    newsBlock,
+    untrustedBlock('最新ニュース見出し（参考データ）', newsBlock),
     '',
     ...(strategy
       ? [
-          '## ユーザーのトレード戦略（この戦略との整合性を必ず考慮すること）',
-          `戦略名: ${strategy.name}（リスク許容度 ${strategy.riskLevel}/5）`,
-          strategy.content,
+          untrustedBlock(
+            `ユーザーのトレード戦略「${strategy.name}」（リスク許容度 ${strategy.riskLevel}/5）— 売買方針の判断材料として整合性を考慮すること`,
+            strategy.content,
+          ),
           '',
         ]
       : []),

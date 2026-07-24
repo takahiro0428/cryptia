@@ -16,6 +16,8 @@ export const ERROR_CODES = {
   AI_PARSE_FAILED: 'CRYPTIA-E202',
   /** リクエスト入力の検証エラー */
   INVALID_INPUT: 'CRYPTIA-E301',
+  /** AI API のレートリミット超過（時間をおいて再試行） */
+  RATE_LIMITED: 'CRYPTIA-E302',
   /** デモトレード: 資金不足で注文を拒否 */
   INSUFFICIENT_FUNDS: 'CRYPTIA-E401',
   /** デモトレード: 保有数量不足で売り注文を拒否 */

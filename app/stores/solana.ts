@@ -109,6 +109,8 @@ export const useSolanaStore = defineStore('solana', {
     ticking: false,
     restored: false,
     _timer: null as ReturnType<typeof setInterval> | null,
+    /** セッション世代。await 中に終了/再開始された旧ティックの執行を防ぐ（ISSUE-3） */
+    _session: 0,
   }),
   getters: {
     ranked(state): TokenScore[] {
@@ -219,6 +221,7 @@ export const useSolanaStore = defineStore('solana', {
       }
       try {
         this.archiveCurrent()
+        this._session++
         this.portfolio = createPortfolio(allocatedUsd)
         this.watchedPairs = [...pairAddresses]
         this.method = method
@@ -254,7 +257,10 @@ export const useSolanaStore = defineStore('solana', {
     startTicking() {
       if (this._timer) return
       this.running = true
+      // 再開状態を即時永続化する（リロードで停止状態に巻き戻さない: 原則2）
+      this._persist()
       this._timer = setInterval(() => void this.tick(), DEGEN_TICK_MS)
+      void this.tick()
     },
     stop() {
       if (this._timer) {
@@ -277,6 +283,7 @@ export const useSolanaStore = defineStore('solana', {
         tokenSymbols: symbols,
       })
       this.archives = this.archives.slice(0, 20)
+      this._session++
       this.portfolio = null
       this.positionMeta = {}
     },
@@ -289,12 +296,15 @@ export const useSolanaStore = defineStore('solana', {
     async tick() {
       if (this.ticking || !this.running || !this.portfolio) return
       this.ticking = true
+      const session = this._session
       try {
         await this.fetchTokens()
+        // await 中にセッションが終了/再開始されていたら旧判断を執行しない（ISSUE-3）
+        if (this._session !== session || !this.running || !this.portfolio) return
         const strategy = useStrategyStore().activeDoc
         const prices = this.priceMap
 
-        for (const addr of this.watchedPairs) {
+        for (const addr of [...this.watchedPairs]) {
           if (!this.portfolio) break
           const token = this.tokenOf(addr)
           if (!token || token.priceUsd <= 0) continue
@@ -308,9 +318,9 @@ export const useSolanaStore = defineStore('solana', {
             for (const { index, rule } of fired) {
               const current = positionOf(this.portfolio, addr)
               if (!current || current.quantity <= 0) break
+              // 数量指定で発注（notional 逆算の誤差で全量損切りが失敗しない: ISSUE-2）
               const sellQty = current.quantity * rule.sellRatio
-              const notionalUsd = sellQty * token.priceUsd
-              if (notionalUsd < 0.01) {
+              if (sellQty * token.priceUsd < 0.01) {
                 meta.triggered.push(index)
                 continue
               }
@@ -318,7 +328,7 @@ export const useSolanaStore = defineStore('solana', {
                 const result = executeOrder(this.portfolio, {
                   assetId: addr,
                   side: 'sell',
-                  notionalUsd,
+                  quantity: sellQty,
                   priceUsd: token.priceUsd,
                   reason:
                     rule.triggerPct >= 0
@@ -351,6 +361,8 @@ export const useSolanaStore = defineStore('solana', {
             } catch {
               decision = decideDegenTrade(token, { strategy, unrealizedPct, exposureRatio })
             }
+            // await 中のセッション切替を検知したら旧判断を破棄（ISSUE-3）
+            if (this._session !== session || !this.running || !this.portfolio) return
             try {
               const result = applyDecision(this.portfolio, decision, {
                 assetId: addr,
