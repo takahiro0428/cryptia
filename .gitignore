@@ -1,0 +1,15 @@
+# シークレットのローカル入力ファイル（scripts/setup-deploy-secrets.ps1 用）
+# 絶対にコミットしないこと。登録後は削除を推奨。
+deploy-secrets.env
+*.secrets.env
+
+# OS / エディタ
+.DS_Store
+Thumbs.db
+
+# Node.js（blog/ 配下のスクリプト実行時）
+node_modules/
+
+# ログ・一時ファイル
+*.log
+tmp/

@@ -1,0 +1,22 @@
+# 外部リポジトリ同期（sync-external-repo.yml）の保護リスト
+#
+# ここに列挙したパスは rsync --delete の対象外となり、
+# 同期元（ai-native-dev-training）に存在しなくても削除・上書きされない。
+# このリポジトリ固有のファイルを追加した場合は、必ずここに追記すること。
+#
+# 書式: rsync の exclude パターン（# と ; で始まる行はコメント）
+
+# リポジトリ固有の設定・メタファイル
+.claude.json
+.gitignore
+LICENSE
+
+# リポジトリ固有のスクリプト（シークレット登録・ドキュメント検証）
+scripts/
+
+# リポジトリ固有のガイド（デプロイ手順書・CI/CDセットアップ）
+.ai-native/guides/deploy-guide.md
+.ai-native/guides/ci-cd-setup.md
+
+# 評価レポート等の記録系データ（冪等性と状態保護の原則: 記録は巻き戻さない）
+.ai-native/outputs/

@@ -1,0 +1,299 @@
+---
+document_id: deploy-guide
+type: guide
+version: 1.0.0
+purpose: GitHub Actions デプロイパイプラインのセットアップ・運用・障害対応の手順書
+---
+
+# デプロイ手順書（Deploy Guide）
+
+GitHub Actions によるデプロイパイプラインのセットアップと運用の手順書。
+本手順書は Phase 7（MVP構築）ゲート条件「デプロイパイプラインの構成」の一部として管理し、
+デプロイ構成を変更した際は必ず本書を更新すること。
+
+**関連ファイル:**
+
+| ファイル | 役割 |
+|---------|------|
+| `.github/workflows/deploy.yml` | デプロイパイプライン本体（GitHub Actions） |
+| `scripts/setup-deploy-secrets.ps1` | 設定値登録スクリプト（PowerShell） |
+| `scripts/run-test-stage.sh` | テスト・デプロイ各ステージの共通実行ラッパー |
+| `.ai-native/guides/ci-cd-setup.md` | デプロイ以外のCI/CD（ラベル・PRチェック等）のセットアップ |
+
+---
+
+## §1 パイプラインの全体像
+
+デプロイは必ず自動テスト（単体・結合・シナリオ）のゲートを通過してから実行される。
+**いずれかのテストが失敗した場合、デプロイは中断され、失敗内容がログに記録される。**
+
+```mermaid
+flowchart LR
+    Start([起動<br/>workflow_dispatch]) --> PF["事前検証<br/>設定値チェック"]
+    PF -->|不足あり| Abort1["❌ 中断<br/>不足項目をログに記録"]
+    PF -->|OK| UT["単体テスト<br/>UNIT_TEST_CMD"]
+    UT -->|失敗| Abort2["❌ 中断<br/>失敗内容をログに記録"]
+    UT -->|成功| IT["結合テスト<br/>INTEGRATION_TEST_CMD"]
+    IT -->|失敗| Abort2
+    IT -->|成功| ST["シナリオテスト<br/>SCENARIO_TEST_CMD"]
+    ST -->|失敗| Abort2
+    ST -->|成功| DP["デプロイ<br/>DEPLOY_CMD"]
+    DP --> Report["結果レポート<br/>Step Summary"]
+    Abort1 --> Report
+    Abort2 --> Report
+
+    style PF fill:#3498db,color:#fff
+    style UT fill:#e67e22,color:#fff
+    style IT fill:#e67e22,color:#fff
+    style ST fill:#e67e22,color:#fff
+    style DP fill:#27ae60,color:#fff
+    style Abort1 fill:#e74c3c,color:#fff
+    style Abort2 fill:#e74c3c,color:#fff
+```
+
+**設計原則:**
+
+- **テストゲート必須:** テストを通過しないデプロイ経路は存在しない（ワークフローの `needs` 依存関係で構造的に強制）
+- **設定値は repository secrets / variables から読み取る:** 認証情報・接続情報をコードやコミットに含めない
+- **失敗の追跡可能性:** 何がどのように失敗したかを Step Summary・アーティファクト・エラーアノテーションの3か所に記録する
+- **同時デプロイ禁止:** 同一環境への並行デプロイは `concurrency` 設定で直列化される
+
+---
+
+## §2 前提条件
+
+| 項目 | 要件 |
+|------|------|
+| PowerShell | 7.1 以降（Windows PowerShell 5.1 は非対応。https://aka.ms/powershell から入手） |
+| GitHub CLI | `gh` インストール済み・認証済み（`gh auth login`） |
+| リポジトリ権限 | secrets / variables の登録に管理者（admin）権限が必要 |
+| テストコード | プロジェクト側に単体・結合・シナリオテストが実装されていること |
+
+GitHub CLI の認証確認:
+
+```powershell
+gh auth status
+```
+
+---
+
+## §3 設定値の一覧
+
+### repository variables（非機密: 実行コマンド）
+
+| 変数名 | 必須 | 内容 | 設定例 |
+|--------|------|------|--------|
+| `SETUP_CMD` | 任意 | 依存関係インストール等のセットアップ | `npm ci` |
+| `UNIT_TEST_CMD` | 必須 | 単体テストの実行コマンド | `npm run test:unit` |
+| `INTEGRATION_TEST_CMD` | 必須 | 結合テストの実行コマンド | `npm run test:integration` |
+| `SCENARIO_TEST_CMD` | 必須 | シナリオテスト（E2E）の実行コマンド | `npm run test:e2e` |
+| `DEPLOY_CMD` | 必須 | デプロイの実行コマンド | `npx firebase deploy --token "$DEPLOY_TOKEN"` |
+
+### repository secrets（機密: 認証情報）
+
+| シークレット名 | 必須 | 内容 |
+|--------------|------|------|
+| `DEPLOY_TOKEN` | 必須 | デプロイ先の認証トークン（Firebase CI トークン、クラウドAPIキー等） |
+| `DEPLOY_TARGET` | 任意 | デプロイ先URL・ホスト名等（機密扱いにしたい場合） |
+| （プロジェクト固有） | 任意 | 追加が必要な場合は §7 の拡張手順を参照 |
+
+> **原則:** 機密値（トークン・パスワード・接続文字列）は必ず secrets へ。
+> コマンド文字列など非機密の設定は variables へ。**いかなる値もコードにハードコードしない。**
+
+---
+
+## §4 セットアップ手順（PowerShell）
+
+### 方法A: 対話モード（推奨）
+
+機密値を画面に表示せずに入力できる。
+
+```powershell
+cd <リポジトリのルート>
+./scripts/setup-deploy-secrets.ps1 `
+    -UnitTestCmd "npm run test:unit" `
+    -IntegrationTestCmd "npm run test:integration" `
+    -ScenarioTestCmd "npm run test:e2e" `
+    -DeployCmd "npx firebase deploy --token `"`$DEPLOY_TOKEN`"" `
+    -SetupCmd "npm ci"
+# → DEPLOY_TOKEN / DEPLOY_TARGET は続けて非表示プロンプトで入力
+```
+
+### 方法B: ファイル一括モード
+
+`deploy-secrets.env`（`.gitignore` 済み）に KEY=VALUE 形式で記述して一括登録する。
+
+```powershell
+# 1. 設定ファイルを作成（このファイルは絶対にコミットしない）
+@"
+UNIT_TEST_CMD=npm run test:unit
+INTEGRATION_TEST_CMD=npm run test:integration
+SCENARIO_TEST_CMD=npm run test:e2e
+DEPLOY_CMD=npx firebase deploy --token "`$DEPLOY_TOKEN"
+SETUP_CMD=npm ci
+DEPLOY_TOKEN=<デプロイ先の認証トークン>
+"@ | Set-Content deploy-secrets.env
+
+# 2. 一括登録
+./scripts/setup-deploy-secrets.ps1 -EnvFile ./deploy-secrets.env
+
+# 3. 登録後は設定ファイルを削除する
+Remove-Item deploy-secrets.env
+```
+
+### 方法C: gh コマンド直接実行（フォールバック）
+
+スクリプトが使えない環境での代替手順。
+
+```powershell
+gh variable set UNIT_TEST_CMD --repo owner/repo --body "npm run test:unit"
+gh variable set INTEGRATION_TEST_CMD --repo owner/repo --body "npm run test:integration"
+gh variable set SCENARIO_TEST_CMD --repo owner/repo --body "npm run test:e2e"
+gh variable set DEPLOY_CMD --repo owner/repo --body "npx firebase deploy --token `"`$DEPLOY_TOKEN`""
+
+# 機密値は履歴に残さないため、対話プロンプト経由で渡す
+Read-Host -Prompt "DEPLOY_TOKEN" -MaskInput | gh secret set DEPLOY_TOKEN --repo owner/repo
+```
+
+### 登録の確認
+
+```powershell
+gh secret list --repo owner/repo
+gh variable list --repo owner/repo
+```
+
+> **冪等性:** 上記手順は何度実行しても安全。既存の設定値が上書きされるだけで、
+> 実行履歴・ログ等の記録系データには影響しない。
+
+---
+
+## §5 デプロイの実行
+
+1. GitHub リポジトリの **Actions** タブ → **デプロイパイプライン / Deploy Pipeline** を選択
+2. **Run workflow** をクリックし、デプロイ先環境（`staging` / `production`）を選択して実行
+3. 実行結果は Run の **Summary** に表示される（各ステージの成否と失敗詳細）
+
+CLI から実行する場合:
+
+```powershell
+gh workflow run deploy.yml --repo owner/repo -f environment=staging
+gh run watch --repo owner/repo   # 進行状況の監視
+```
+
+**push 時の自動デプロイを有効にする場合:** `.github/workflows/deploy.yml` の
+`on:` セクションにあるコメントアウトされた `push:` トリガーを有効化する。
+
+**環境保護（推奨）:** リポジトリの Settings → Environments で `production` 環境に
+必須レビュアーを設定すると、本番デプロイ前にオペレーターの承認を挟める
+（方法論のオペレーター最終判断・SP-1 と整合する運用）。Phase 7 ゲート条件 7-8 の
+確認時に、この設定の有無も合わせて確認すること。
+
+**同時実行の注意:** 同一環境への実行は `concurrency` 設定で直列化される。GitHub の仕様上、
+**待機中**の実行は同一環境への新しい実行が起動されると自動キャンセルされる（実行中のものは
+キャンセルされない）。連続して複数回起動した場合、中間の実行がキャンセル扱いになるのは正常動作。
+
+---
+
+## §6 テスト失敗・デプロイ失敗時の対処
+
+パイプラインが失敗した場合、**デプロイは実行されない**。以下の順に確認する。
+
+### 6-1. 何が失敗したかの確認
+
+| 確認場所 | 内容 |
+|---------|------|
+| Run の **Summary** | 失敗ステージ名・終了コード・実行コマンド・ログ末尾50行 |
+| アーティファクト `deploy-logs` | テストゲート（単体・結合・シナリオ）の完全な実行ログ（30日保持） |
+| アーティファクト `deploy-execution-logs` | デプロイステージの完全な実行ログ（30日保持） |
+| ジョブのエラーアノテーション | 失敗箇所への直接リンク |
+
+### 6-2. 失敗パターン別の対処
+
+| 失敗ステージ | 主な原因 | 対処 |
+|-------------|---------|------|
+| 事前検証 | 設定値の未登録 | Summary に不足項目が列挙される → §4 の手順で登録 |
+| 単体テスト | 実装のバグ、テストの期待値ずれ | ログで失敗テストを特定し、Minimal スコープ（修正→二重ゲートレビュー→承認）で修正 |
+| 結合テスト | モジュール間 I/F の不整合 | I/F設計（Phase 5 成果物）との整合を確認して修正 |
+| シナリオテスト | ユースケースレベルの動作不良 | ユーザー・運用サポートのテストシナリオと突き合わせて修正 |
+| デプロイ | 認証エラー、デプロイ先の問題 | `DEPLOY_TOKEN` の有効期限・権限を確認。トークン再発行時は §4 で再登録 |
+
+> **原則:** テスト失敗を「スキップして再実行」で回避しない。テストゲートの無効化・
+> 緩和はシステム監査官の安全ゲート対象であり、オペレーター承認なしに行わないこと。
+
+### 6-3. 本番障害を伴う場合
+
+サービス停止等の緊急時は方法論の EMERGENCY_PATH（`phase-definitions.md`）に従う。
+緊急対応時もテストゲートは省略せず、修正 → パイプライン実行 → デプロイの経路を維持する。
+
+---
+
+## §7 プロジェクト固有のカスタマイズ
+
+### シークレットの追加
+
+1. `scripts/setup-deploy-secrets.ps1 -EnvFile` またはghコマンドで新しいシークレットを登録する
+   （例: `FIREBASE_SERVICE_ACCOUNT`）
+2. `.github/workflows/deploy.yml` の deploy ジョブにある拡張ポイント
+   （「プロジェクト固有のシークレットはここに追加する」コメント箇所）に環境変数を追記する:
+
+   ```yaml
+   FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+   ```
+
+3. 同じ deploy ステップの `SCRUB_SECRET_NAMES` に追加したシークレット名を列挙する:
+
+   ```yaml
+   SCRUB_SECRET_NAMES: DEPLOY_TOKEN DEPLOY_TARGET FIREBASE_SERVICE_ACCOUNT
+   ```
+
+   > ここに列挙された環境変数の値は、ログ・Step Summary の保存前に `***` へ置換される。
+   > 列挙漏れがあると、デプロイコマンドがその値を出力した場合にアーティファクトへ
+   > 平文で残るため、シークレット追加時は必ずセットで更新すること（§9 参照）
+
+4. 本手順書 §3 の一覧表に追加したシークレットを追記する（コードとドキュメントの一貫性）
+
+### テストステージの調整
+
+- テストコマンドの変更は repository variables の更新のみで完結する（ワークフロー変更不要）
+- ステージ追加（例: 静的解析）が必要な場合は `test` ジョブにステップを追加し、
+  `scripts/run-test-stage.sh` を再利用する
+
+---
+
+## §8 手動デプロイ（フォールバック）
+
+GitHub Actions が利用できない場合のみ、以下の手順で手動デプロイする。
+**手動デプロイは緊急フォールバックであり、通常経路にしないこと。**
+
+1. ローカルで全テストを実行し、全通過を確認する（`&&` 連結により前段失敗時点で停止する）:
+
+   ```powershell
+   npm run test:unit && npm run test:integration && npm run test:e2e
+   ```
+
+2. すべて成功した場合のみ、デプロイコマンドを実行する（認証情報は環境変数で渡す）:
+
+   ```powershell
+   $env:DEPLOY_TOKEN = Read-Host -Prompt "DEPLOY_TOKEN" -MaskInput
+   npx firebase deploy --token "$env:DEPLOY_TOKEN"   # プロジェクトの DEPLOY_CMD に読み替える
+   ```
+
+3. 手動デプロイした事実・理由・結果を意思決定ログ（progress-management.md）に記録する
+4. 事後に GitHub Actions 経路を復旧し、次回以降は必ずパイプライン経由に戻す
+
+---
+
+## §9 セキュリティ上の注意
+
+- **認証情報をコミットしない。** リポジトリ内での機密値の管理は repository secrets のみとする
+  （`scripts/validate-docs.sh` の C-4 シークレット混入チェックが CI で検知する）
+- **ログ・アーティファクトへの露出に注意。** GitHub のシークレットマスキングはストリームログ
+  にのみ適用され、**アーティファクトファイルや Step Summary の内容には適用されない**。
+  パイプラインは `SCRUB_SECRET_NAMES` に列挙されたシークレット値を保存前に `***` へ置換するが、
+  デプロイコマンド側でも冗長出力（`curl -v`、デバッグモード等）でトークンを出力しない構成にすること。
+  シークレット追加時は §7 の手順で `SCRUB_SECRET_NAMES` を必ず更新する
+- **トークンは最小権限で発行する。** デプロイに必要な権限のみを持つトークンを使用する
+- **漏えい時は即時ローテーション。** トークンがコミット履歴・ログ等に露出した場合は、
+  直ちに発行元で無効化（revoke）→ 再発行 → §4 で再登録する。コミット削除だけでは不十分
+  （履歴・フォーク・キャッシュに残るため、無効化が唯一の確実な対処）
+- **定期ローテーション。** 認証トークンは有効期限を設定し、期限前に §4 の手順で更新する

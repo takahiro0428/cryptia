@@ -1,0 +1,228 @@
+# =============================================================================
+# デプロイパイプライン / Deploy Pipeline
+#
+# 単体テスト → 結合テスト → シナリオテスト → デプロイ の順で実行し、
+# いずれかのテストが失敗した場合はデプロイを中断する。
+# 「何がどのように失敗したか」は Step Summary とアーティファクト
+# （テストゲート: deploy-logs / デプロイステージ: deploy-execution-logs）に残る。
+#
+# 設定方法（詳細は .ai-native/guides/deploy-guide.md を参照）:
+#   - 設定値の登録: scripts/setup-deploy-secrets.ps1（PowerShell / gh CLI）
+#   - repository variables（非機密）: SETUP_CMD(任意), UNIT_TEST_CMD,
+#     INTEGRATION_TEST_CMD, SCENARIO_TEST_CMD, DEPLOY_CMD
+#   - repository secrets（機密）  : DEPLOY_TOKEN（必須）, DEPLOY_TARGET(任意)
+#     ※ 認証情報・接続文字列は必ず repository secrets で管理し、コミットしない
+# =============================================================================
+name: デプロイパイプライン / Deploy Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'デプロイ先環境（Deploy target environment）'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+  # プロジェクトで push 時の自動デプロイを有効にする場合は以下のコメントを外す
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+# 同一環境への同時デプロイを禁止（実行中のデプロイはキャンセルしない）
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 事前検証: 必要な設定値（variables / secrets）が揃っているかを最初に確認し、
+  # 不足があれば「何が足りないか」を明示して即座に失敗させる
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: 事前検証（設定値チェック）
+    runs-on: ubuntu-latest
+    env:
+      UNIT_TEST_CMD: ${{ vars.UNIT_TEST_CMD }}
+      INTEGRATION_TEST_CMD: ${{ vars.INTEGRATION_TEST_CMD }}
+      SCENARIO_TEST_CMD: ${{ vars.SCENARIO_TEST_CMD }}
+      DEPLOY_CMD: ${{ vars.DEPLOY_CMD }}
+      HAS_DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN != '' }}
+    steps:
+      - name: 必須設定値の存在確認
+        run: |
+          MISSING=""
+
+          check_var() {
+            local name="$1" value="$2"
+            if [ -z "$value" ]; then
+              MISSING="${MISSING}\n- **${name}**（repository variable）が未設定です"
+            fi
+          }
+
+          # secret は値ではなく存在フラグ（"true"/"false"）で判定する
+          check_secret() {
+            local name="$1" present="$2"
+            if [ "$present" != "true" ]; then
+              MISSING="${MISSING}\n- **${name}**（repository secret）が未設定です"
+            fi
+          }
+
+          check_var "UNIT_TEST_CMD"        "$UNIT_TEST_CMD"
+          check_var "INTEGRATION_TEST_CMD" "$INTEGRATION_TEST_CMD"
+          check_var "SCENARIO_TEST_CMD"    "$SCENARIO_TEST_CMD"
+          check_var "DEPLOY_CMD"           "$DEPLOY_CMD"
+          check_secret "DEPLOY_TOKEN"      "$HAS_DEPLOY_TOKEN"
+
+          if [ -n "$MISSING" ]; then
+            {
+              echo "## ❌ 事前検証失敗 — デプロイを中断します"
+              echo ""
+              echo "以下の設定値が未登録です。\`scripts/setup-deploy-secrets.ps1\` で登録してください"
+              echo "（手順書: \`.ai-native/guides/deploy-guide.md\`）:"
+              echo -e "$MISSING"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::必須設定値が不足しています。Step Summary を確認してください。"
+            exit 1
+          fi
+
+          echo "- ✅ **事前検証**: 必須設定値はすべて登録済み" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ 事前検証 OK"
+
+  # ---------------------------------------------------------------------------
+  # テストゲート: 単体 → 結合 → シナリオ の順に実行。
+  # 前段が失敗した時点で以降は実行されず、デプロイは中断される。
+  # ---------------------------------------------------------------------------
+  test:
+    name: テストゲート（単体・結合・シナリオ）
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: 環境セットアップ（SETUP_CMD が設定されている場合のみ）
+        if: vars.SETUP_CMD != ''
+        env:
+          STAGE_CMD: ${{ vars.SETUP_CMD }}
+        run: bash scripts/run-test-stage.sh "環境セットアップ" setup
+
+      - name: 単体テスト
+        id: unit
+        env:
+          STAGE_CMD: ${{ vars.UNIT_TEST_CMD }}
+        run: bash scripts/run-test-stage.sh "単体テスト" unit-test
+
+      - name: 結合テスト
+        id: integration
+        env:
+          STAGE_CMD: ${{ vars.INTEGRATION_TEST_CMD }}
+        run: bash scripts/run-test-stage.sh "結合テスト" integration-test
+
+      - name: シナリオテスト
+        id: scenario
+        env:
+          STAGE_CMD: ${{ vars.SCENARIO_TEST_CMD }}
+        run: bash scripts/run-test-stage.sh "シナリオテスト" scenario-test
+
+      - name: テストログをアーティファクトとして保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-logs
+          path: .deploy-logs/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # デプロイ: 全テストゲート通過時のみ実行。
+  # 認証情報は repository secrets から環境変数として注入する。
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: デプロイ実行
+    needs: [preflight, test]
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v4
+
+      - name: 環境セットアップ（SETUP_CMD が設定されている場合のみ）
+        if: vars.SETUP_CMD != ''
+        env:
+          STAGE_CMD: ${{ vars.SETUP_CMD }}
+          ARTIFACT_NAME: deploy-execution-logs
+        run: bash scripts/run-test-stage.sh "環境セットアップ" setup-deploy
+
+      - name: デプロイ
+        env:
+          STAGE_CMD: ${{ vars.DEPLOY_CMD }}
+          ARTIFACT_NAME: deploy-execution-logs
+          # --- repository secrets から注入される設定値 ---
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_TARGET }}
+          DEPLOY_ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
+          # --- プロジェクト固有のシークレットはここに追加する ---
+          # 例: FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # 例: AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # 追加したシークレット名は SCRUB_SECRET_NAMES にも列挙すること
+          # （ログ・サマリー保存前に値が *** へ置換される。deploy-guide.md §7 参照）
+          SCRUB_SECRET_NAMES: DEPLOY_TOKEN DEPLOY_TARGET
+        run: bash scripts/run-test-stage.sh "デプロイ" deploy
+
+      - name: デプロイログをアーティファクトとして保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-execution-logs
+          path: .deploy-logs/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 最終レポート: 成否にかかわらずパイプライン全体の結果を Step Summary に記録
+  # ---------------------------------------------------------------------------
+  report:
+    name: パイプライン結果レポート
+    needs: [preflight, test, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 結果サマリーを出力
+        env:
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          TARGET_ENV: ${{ github.event.inputs.environment || 'staging' }}
+        run: |
+          to_mark() {
+            case "$1" in
+              success) echo "✅ 成功" ;;
+              failure) echo "❌ 失敗" ;;
+              skipped) echo "⏭️ スキップ（前段の失敗により未実行）" ;;
+              *)       echo "$1" ;;
+            esac
+          }
+
+          {
+            echo "# デプロイパイプライン結果（環境: ${TARGET_ENV}）"
+            echo ""
+            echo "| ステージ | 結果 |"
+            echo "|---------|------|"
+            echo "| 事前検証 | $(to_mark "$PREFLIGHT_RESULT") |"
+            echo "| テストゲート（単体・結合・シナリオ） | $(to_mark "$TEST_RESULT") |"
+            echo "| デプロイ | $(to_mark "$DEPLOY_RESULT") |"
+            echo ""
+            if [ "$DEPLOY_RESULT" = "success" ]; then
+              echo "🎉 デプロイが完了しました。"
+            else
+              echo "⚠️ デプロイは実行されていません。失敗したステージの Step Summary と"
+              echo "アーティファクト（テストゲート: deploy-logs / デプロイステージ: deploy-execution-logs）で"
+              echo "「何がどのように失敗したか」を確認し、"
+              echo "修正後に再実行してください。対処手順: \`.ai-native/guides/deploy-guide.md\` §6"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
