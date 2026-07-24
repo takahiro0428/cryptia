@@ -55,6 +55,16 @@ echo "▶ Nuxt ビルド（NITRO_PRESET=firebase）"
   pnpm run build
 )
 
+# --- Functions ソースの依存関係インストール ---
+# firebase-tools はデプロイ前にソースをローカルへロードしてトリガーを解析するため、
+# .output/server（Nitro 生成の package.json）に node_modules が必要。
+# これがないと「Cannot find package 'firebase-functions'」でデプロイが失敗する。
+echo "▶ Functions 依存関係のインストール（トリガー解析用）"
+(
+  cd app/.output/server
+  npm install --omit=dev --no-audit --no-fund
+)
+
 # --- Cloud Functions のランタイム環境変数（firebase-tools の dotenv 機構） ---
 echo "▶ Functions ランタイム設定を生成"
 {

@@ -29,7 +29,8 @@ export default defineNuxtConfig({
       // firebase.json の hosting rewrite（functionId）と一致させること
       serverFunctionName: 'cryptiaserver',
       httpsOptions: { region: 'asia-northeast1', maxInstances: 3 },
-      nodeVersion: '20',
+      // Node 20 は 2026-10-30 に GCF ランタイム廃止のため 22 を使用
+      nodeVersion: '22',
     },
   },
   runtimeConfig: {
