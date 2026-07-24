@@ -1,12 +1,13 @@
 {
   "hosting": {
+    "target": "cryptia",
     "public": "app/.output/public",
     "cleanUrls": true,
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [
       {
         "source": "/api/**",
-        "function": { "functionId": "server", "region": "asia-northeast1" }
+        "function": { "functionId": "cryptiaserver", "region": "asia-northeast1" }
       },
       { "source": "**", "destination": "/index.html" }
     ],
@@ -22,9 +23,11 @@
     ]
   },
   "functions": {
-    "source": "app/.output/server"
+    "source": "app/.output/server",
+    "codebase": "cryptia"
   },
   "firestore": {
+    "database": "cryptia",
     "rules": "firestore.rules"
   }
 }

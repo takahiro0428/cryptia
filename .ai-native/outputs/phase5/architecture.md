@@ -22,7 +22,7 @@ flowchart TB
         JUP["Jupiter<br/>スワップ"]
         RSSF["CoinDesk / Cointelegraph RSS"]
     end
-    FS[(Firestore<br/>users/{uid}/state)]
+    FS[(Firestore<br/>cryptia-users/{uid}/state)]
     Wallet["Phantom Wallet"]
 
     Stores -->|直接fetch| CG
@@ -64,10 +64,15 @@ flowchart LR
     Preflight --> Test["テストゲート<br/>単体→結合→シナリオ"]
     Test -->|全通過| Deploy["deploy-firebase.sh<br/>build + firebase deploy"]
     Test -->|失敗| Halt["中断 + Step Summary +<br/>deploy-logs アーティファクト"]
-    Deploy --> H["Firebase Hosting<br/>（静的 + CDN）"]
-    Deploy --> F["Cloud Functions gen2<br/>asia-northeast1"]
-    Deploy --> R["Firestore Rules"]
+    Deploy --> H["Firebase Hosting<br/>target: cryptia（サイト名可変）"]
+    Deploy --> F["Cloud Functions gen2<br/>codebase: cryptia / 関数名 cryptiaserver"]
+    Deploy -.->|"DEPLOY_FIRESTORE_RULES=true"| R["Firestore Rules<br/>（専用DB cryptia のみ）"]
 ```
+
+> **共有プロジェクトでの同居:** Functions は codebase `cryptia`・関数名 `cryptiaserver`、
+> Hosting は target `cryptia`（`FIREBASE_HOSTING_SITE` で実サイトへバインド）、
+> Firestore は**専用の名前付きデータベース `cryptia`**（+ コレクション `cryptia-` prefix の多層防御）。
+> Security Rules はデータベース単位のため、ルールのデプロイも他アプリへ影響しない。
 
 - テストゲート: `UNIT_TEST_CMD` → `INTEGRATION_TEST_CMD` → `SCENARIO_TEST_CMD`（既存パイプラインを再利用: 原則3）
 - シークレット: repository secrets（`DEPLOY_TOKEN` = SA JSON / `DEPLOY_TARGET` = プロジェクト ID）
