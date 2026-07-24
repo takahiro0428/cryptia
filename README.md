@@ -234,6 +234,33 @@ Phase 0 から開始します。
 
 ---
 
+## Cryptia アプリ（本方法論による開発成果物）
+
+本リポジトリの `app/` 配下には、この方法論に基づいて開発された
+**AI トレード支援アプリ「Cryptia」**（Nuxt 3 + Firebase + GCP + Vertex AI / PWA）が含まれています。
+
+| 機能 | 概要 |
+|------|------|
+| マーケット | 主要仮想通貨・株式トークン・ゴールドトークンのリアルタイム価格 |
+| 資金フローマップ | 銘柄間の推定資金フローを空間バブルマップ＋矢印で可視化 |
+| AI 分析 | Vertex AI (Gemini) による短期・中期・長期のトレードアドバイス |
+| AI デモトレード | 初期資金を設定して AI が自動売買をシミュレーション |
+| Solana 魔界トレード | 草コインのスコアリング選定 + AI/ラダーロジック自動取引（デモ） |
+| 実トレード | Phantom ウォレット接続 + Jupiter 経由の実スワップ（安全ガード付き） |
+| RAG 戦略設定 | 戦略ドキュメントで AI の売買判断をカスタマイズ |
+
+```bash
+cd app
+pnpm install
+pnpm dev            # 開発サーバー
+pnpm run test:unit  # 単体テスト（test:integration / test:scenario も同様）
+```
+
+- 設計・運用ドキュメント: `.ai-native/outputs/phase5/`（設計）、`.ai-native/outputs/knowledge-base/`（利用ガイド）
+- デプロイ手順: `.ai-native/guides/deploy-guide.md`（GitHub Actions + Firebase）
+
+---
+
 ## スコープ別フロー
 
 プロジェクトの規模や目的に応じて、最適なフローを選択できます。

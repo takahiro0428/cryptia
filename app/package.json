@@ -1,0 +1,39 @@
+{
+  "name": "cryptia-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "test:unit": "vitest run --dir tests/unit",
+    "test:integration": "vitest run --dir tests/integration",
+    "test:scenario": "vitest run --dir tests/scenario",
+    "typecheck": "nuxt typecheck"
+  },
+  "dependencies": {
+    "@pinia/nuxt": "^0.11.0",
+    "@solana/web3.js": "^1.98.0",
+    "@vite-pwa/nuxt": "^1.0.4",
+    "firebase": "^11.9.0",
+    "google-auth-library": "^10.1.0",
+    "nuxt": "^3.19.0",
+    "pinia": "^3.0.2"
+  },
+  "devDependencies": {
+    "@vue/test-utils": "^2.4.6",
+    "h3": "^1.15.11",
+    "happy-dom": "^18.0.1",
+    "vitest": "^3.2.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@firebase/util",
+      "esbuild",
+      "protobufjs"
+    ]
+  }
+}

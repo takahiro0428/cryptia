@@ -100,9 +100,53 @@ gh auth status
 > **原則:** 機密値（トークン・パスワード・接続文字列）は必ず secrets へ。
 > コマンド文字列など非機密の設定は variables へ。**いかなる値もコードにハードコードしない。**
 
+### Cryptia アプリ（本リポジトリ）の実際の設定値
+
+Cryptia アプリ（`app/` 配下、Firebase + GCP + Vertex AI 構成）では以下を使用する。
+登録は §4 の Cryptia 専用スクリプトで一括実行できる。
+
+| 種別 | 名前 | 値 / 内容 |
+|------|------|-----------|
+| variable | `SETUP_CMD` | `bash scripts/ci-setup.sh`（pnpm 導入 + 依存インストール） |
+| variable | `UNIT_TEST_CMD` | `cd app && pnpm run test:unit` |
+| variable | `INTEGRATION_TEST_CMD` | `cd app && pnpm run test:integration` |
+| variable | `SCENARIO_TEST_CMD` | `cd app && pnpm run test:scenario` |
+| variable | `DEPLOY_CMD` | `bash scripts/deploy-firebase.sh`（ビルド + Hosting/Functions/Rules デプロイ) |
+| variable | `NUXT_VERTEX_LOCATION` / `NUXT_VERTEX_MODEL` | Vertex AI のリージョン・モデル名 |
+| variable | `NUXT_PUBLIC_FIREBASE_API_KEY` ほか `NUXT_PUBLIC_FIREBASE_*` | Firebase Web 設定（公開可能な識別子） |
+| secret | `DEPLOY_TOKEN` | Firebase/GCP **サービスアカウント JSON キーの全文** |
+| secret | `DEPLOY_TARGET` | Firebase プロジェクト ID |
+
+> サービスアカウントには `roles/firebase.admin`・`roles/cloudfunctions.developer`・
+> `roles/iam.serviceAccountUser` 相当の権限、および Vertex AI 利用時は
+> Cloud Functions 実行 SA に `roles/aiplatform.user` を付与する。
+
 ---
 
 ## §4 セットアップ手順（PowerShell）
+
+### Cryptia アプリの一括登録（Windows PowerShell 5.1 対応・推奨）
+
+本リポジトリの Cryptia アプリは専用スクリプト `scripts/setup-cryptia-secrets.ps1` で
+必要な設定値をすべて一括登録できる。**Windows PowerShell 5.1 で実行可能**（PowerShell 7 不要）で、
+スクリプトは UTF-8 (BOM付き) のため Shift-JIS 既定の環境でも文字化けしない。
+
+```powershell
+cd <リポジトリのルート>
+.\scripts\setup-cryptia-secrets.ps1 `
+    -ProjectId "your-firebase-project-id" `
+    -ServiceAccountJsonPath "C:\keys\service-account.json" `
+    -FirebaseApiKey "AIza..." `
+    -FirebaseAuthDomain "your-project.firebaseapp.com" `
+    -FirebaseAppId "1:123456:web:abcdef"
+# Firebase Web 設定（-FirebaseApiKey 以下）は任意。未設定時はアプリが
+# Firestore 同期なしのローカル保存モードで動作する。
+```
+
+機密値（サービスアカウント JSON）はコマンドライン引数に値そのものを載せず、
+一時ファイル + 標準入力経由で `gh` に渡されるため、プロセス一覧・履歴に残らない。
+
+以下は汎用テンプレートの手順（他プロジェクト向け。PowerShell 7.1 以降が必要）。
 
 ### 方法A: 対話モード（推奨）
 

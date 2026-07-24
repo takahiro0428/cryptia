@@ -1,0 +1,20 @@
+# Nuxt
+.nuxt/
+.output/
+.data/
+dist/
+
+# 依存
+node_modules/
+
+# PWA 生成物
+dev-dist/
+sw.js
+workbox-*.js
+
+# 環境変数（Firebase/GCP 設定はコミットしない）
+.env
+.env.*
+
+# ログ
+*.log
