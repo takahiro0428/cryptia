@@ -15,10 +15,20 @@ const asset = computed(() => ASSET_MAP[props.ticker.assetId])
 const rootRef = ref<HTMLElement | null>(null)
 
 onMounted(() => {
-  // 展開時にカード全体が視界に入るよう追従スクロール（画面外に出た分だけ寄せる）
-  requestAnimationFrame(() => {
-    rootRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-  })
+  // 展開時にカード全体が視界に入るよう追従スクロール。
+  // scaleY アニメーション中は矩形が縮小されておりスクロール量が過小になるため、
+  // アニメーション完了後に実行する（ISSUE-P8-17）。
+  // reduced-motion 等で animationend が発火しない場合はタイムアウトで代替
+  const el = rootRef.value
+  if (!el) return
+  let done = false
+  const scroll = () => {
+    if (done) return
+    done = true
+    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+  el.addEventListener('animationend', scroll, { once: true })
+  setTimeout(scroll, 350)
 })
 </script>
 

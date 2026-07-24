@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { CircleUserRound, Link2 } from '@lucide/vue'
-import { formatError } from '~/shared/errors'
+import { ERROR_CODES, formatError } from '~/shared/errors'
 import { useFirebase, type AccountInfo } from '~/composables/useFirebase'
 import { useUiStore } from '~/stores/ui'
 
@@ -22,7 +22,7 @@ onMounted(async () => {
     info.value = ctx.accountInfo()
     // リダイレクト連携から復帰した際のエラーを通知（ISSUE-P8-14）
     const linkError = ctx.consumeLinkError()
-    if (linkError) ui.notify(linkError, 'error', 'CRYPTIA-E602')
+    if (linkError) ui.notify(linkError, 'error', ERROR_CODES.ACCOUNT_LINK_FAILED)
   }
 })
 
