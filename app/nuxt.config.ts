@@ -22,6 +22,10 @@ export default defineNuxtConfig({
   },
   nitro: {
     preset: process.env.NITRO_PRESET,
+    // SPA シェルを静的 index.html として出力する（ssr: false では既定で
+    // サーバーレンダラーが担うため、これがないと Hosting の
+    // 「** → /index.html」rewrite が 404 になる）。CDN 配信で初期表示も速くなる
+    prerender: { routes: ['/'] },
     firebase: {
       gen: 2,
       // 共有 Firebase プロジェクトでの同居前提のため、既定の 'server' から
