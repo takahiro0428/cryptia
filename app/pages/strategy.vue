@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Check, Plus } from '@lucide/vue'
 import type { StrategyDoc } from '~/shared/types'
 import { useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
@@ -70,7 +71,9 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
   <div>
     <div class="card-title">
       <h1>RAG 戦略設定</h1>
-      <button class="btn btn-primary btn-sm" type="button" @click="startCreate">＋ 新規戦略</button>
+      <button class="btn btn-primary btn-sm" type="button" @click="startCreate">
+        <Plus :size="15" aria-hidden="true" /> 新規戦略
+      </button>
     </div>
     <p class="small dim">
       選択した戦略ドキュメントが AI のプロンプトに注入され、インサイト・デモトレード・実トレードの判断が変わります。
@@ -104,6 +107,9 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
       </div>
     </section>
 
+    <!-- アカウント連携（データ永続化: AUDIT-9 本対応） -->
+    <AccountLink style="margin-top: 12px" />
+
     <!-- 戦略一覧 -->
     <div class="grid grid-2" style="margin-top: 12px">
       <div
@@ -131,7 +137,8 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
             :disabled="doc.id === strategy.activeId"
             @click="strategy.setActive(doc.id)"
           >
-            {{ doc.id === strategy.activeId ? '✓ 適用中' : 'この戦略を使う' }}
+            <Check v-if="doc.id === strategy.activeId" :size="14" aria-hidden="true" />
+            {{ doc.id === strategy.activeId ? '適用中' : 'この戦略を使う' }}
           </button>
           <button class="btn btn-sm btn-ghost" type="button" @click="startEdit(doc)">
             {{ doc.builtin ? '複製して編集' : '編集' }}

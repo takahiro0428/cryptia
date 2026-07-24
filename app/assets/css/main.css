@@ -212,13 +212,16 @@ table.data tr:last-child td { border-bottom: none; }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  gap: 3px;
   color: var(--text-faint);
   font-size: 0.62rem;
   font-weight: 600;
 }
-.nav-mobile a .icon { font-size: 1.25rem; line-height: 1; }
 .nav-mobile a.nav-active { color: var(--accent); }
+
+/* lucide アイコンの行内配置ユーティリティ */
+.icon-inline { vertical-align: -3px; margin-right: 4px; }
+h1 .icon-inline, h2 .icon-inline { vertical-align: -3px; margin-right: 6px; color: var(--accent); }
 
 /* ---- 通知トースト ---- */
 .toast-region {

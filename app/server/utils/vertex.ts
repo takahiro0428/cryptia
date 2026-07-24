@@ -23,7 +23,13 @@ export interface VertexConfig {
 }
 
 export function vertexConfig(): VertexConfig | null {
-  const config = useRuntimeConfig()
+  // Nitro 外（単体テスト等）では useRuntimeConfig が存在しないため未設定扱いにする
+  let config: { gcpProjectId?: string; vertexLocation?: string; vertexModel?: string }
+  try {
+    config = useRuntimeConfig()
+  } catch {
+    return null
+  }
   const projectId = config.gcpProjectId || process.env.GOOGLE_CLOUD_PROJECT || ''
   if (!projectId) return null
   return {
@@ -84,6 +90,43 @@ export async function generateWithVertex(
     console.warn(
       `[${ERROR_CODES.AI_UNAVAILABLE}] Vertex AI 呼び出し失敗: ${err instanceof Error ? err.message : err}`,
     )
+    return null
+  }
+}
+
+/**
+ * Vertex AI Embeddings（text-embedding-005）。ベクトル RAG の検索に使用する。
+ * 未設定・失敗時は null（呼び出し元がキーワード検索へフォールバック）。
+ */
+export async function embedTexts(texts: string[]): Promise<number[][] | null> {
+  const cfg = vertexConfig()
+  if (!cfg || texts.length === 0) return null
+  try {
+    const client = await getAuth().getClient()
+    const token = await client.getAccessToken()
+    if (!token.token) return null
+    const url = `https://${cfg.location}-aiplatform.googleapis.com/v1/projects/${cfg.projectId}/locations/${cfg.location}/publishers/google/models/text-embedding-005:predict`
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 6000)
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${token.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instances: texts.map((text) => ({ content: text.slice(0, 2000), task_type: 'RETRIEVAL_DOCUMENT' })),
+        }),
+      })
+      if (!res.ok) return null
+      const data = (await res.json()) as {
+        predictions?: { embeddings?: { values?: number[] } }[]
+      }
+      const vectors = (data.predictions ?? []).map((p) => p.embeddings?.values ?? [])
+      return vectors.length === texts.length && vectors.every((v) => v.length > 0) ? vectors : null
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch {
     return null
   }
 }

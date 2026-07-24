@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Bot, FlaskConical, TriangleAlert } from '@lucide/vue'
 import { ASSET_MAP, ASSET_CLASS_LABELS, ASSETS } from '~/shared/assets'
 import { fmtAgo, fmtPct, fmtUsd } from '~/shared/format'
 import type { AssetClass } from '~/shared/types'
@@ -40,7 +41,8 @@ useHead({ title: 'マーケット | Cryptia' })
     </div>
 
     <div v-if="market.usingMockData" class="disclaimer" role="alert">
-      ⚠️ 価格 API に接続できないため参考データ（モック）を表示しています。表示中の価格は実勢と異なります。
+      <TriangleAlert :size="14" class="icon-inline" aria-hidden="true" />
+      価格 API に接続できないため参考データ（モック）を表示しています。表示中の価格は実勢と異なります。
     </div>
 
     <div class="tabs" role="tablist" style="margin-bottom: 12px">
@@ -96,8 +98,12 @@ useHead({ title: 'マーケット | Cryptia' })
       </div>
       <PriceChart :values="selectedTicker.sparkline7d" :color="selectedAsset.color" />
       <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap">
-        <NuxtLink :to="`/insights?asset=${selectedAsset.id}`" class="btn btn-primary btn-sm">🤖 AI分析を見る</NuxtLink>
-        <NuxtLink to="/trade/demo" class="btn btn-sm">🧪 デモトレード</NuxtLink>
+        <NuxtLink :to="`/insights?asset=${selectedAsset.id}`" class="btn btn-primary btn-sm">
+          <Bot :size="15" aria-hidden="true" /> AI分析を見る
+        </NuxtLink>
+        <NuxtLink to="/trade/demo" class="btn btn-sm">
+          <FlaskConical :size="15" aria-hidden="true" /> デモトレード
+        </NuxtLink>
       </div>
     </section>
 

@@ -3,10 +3,16 @@ import { ASSET_MAP } from '~/shared/assets'
 import { fallbackInsight } from '~/shared/advisor'
 import { clamp } from '~/shared/ta'
 import type { Insight, Stance } from '~/shared/types'
-import { getMarketNews } from '../../utils/news'
+import { filterNewsForAsset, getMarketNews } from '../../utils/news'
 import { untrustedBlock } from '../../utils/prompt'
+import { retrieveRelevantStrategies } from '../../utils/rag'
 import { generateWithVertex, parseJsonResponse } from '../../utils/vertex'
-import { validateHorizon, validateStrategy, validateTicker } from '../../utils/validation'
+import {
+  validateHorizon,
+  validateStrategy,
+  validateStrategyLibrary,
+  validateTicker,
+} from '../../utils/validation'
 
 const HORIZON_LABELS = { short: '短期（〜1週間）', mid: '中期（〜1ヶ月）', long: '長期（〜1年）' }
 const STANCES: Stance[] = ['bullish', 'neutral', 'bearish']
@@ -30,9 +36,11 @@ export default defineEventHandler(async (event): Promise<Insight> => {
   const ticker = validateTicker(body?.ticker)
   const horizon = validateHorizon(body?.horizon)
   const strategy = validateStrategy(body?.strategy)
+  const library = validateStrategyLibrary(body?.library)
   const asset = ASSET_MAP[ticker.assetId]
 
-  const news = await getMarketNews()
+  // ニュースは対象銘柄に関連する見出しを優先する（F-10 本格化）
+  const news = filterNewsForAsset(await getMarketNews(), asset)
   const newsBlock =
     news.length > 0
       ? news
@@ -40,6 +48,13 @@ export default defineEventHandler(async (event): Promise<Insight> => {
           .map((n) => `- ${n.title}（${n.source}）`)
           .join('\n')
       : '（ニュース取得なし）'
+
+  // ベクトル RAG: 戦略ライブラリから関連ノウハウを検索して文脈注入（F-09 本格化）
+  const rag = await retrieveRelevantStrategies(
+    library,
+    `${asset?.nameJa ?? ''} ${asset?.symbol ?? ''} ${horizon === 'short' ? '短期' : horizon === 'mid' ? '中期' : '長期'} トレード ${ticker.change24hPct >= 0 ? '上昇' : '下落'}`,
+    { excludeId: strategy?.id },
+  )
 
   const prompt = [
     'あなたは暗号資産・トークン化資産のプロアナリストです。以下の情報から売買スタンスを分析してください。',
@@ -64,6 +79,15 @@ export default defineEventHandler(async (event): Promise<Insight> => {
           '',
         ]
       : []),
+    ...(rag.docs.length > 0
+      ? [
+          untrustedBlock(
+            '参考: ユーザーの戦略ライブラリから検索された関連ノウハウ（補助的な判断材料）',
+            rag.docs.map((d) => `【${d.name}】\n${d.content}`).join('\n\n'),
+          ),
+          '',
+        ]
+      : []),
     '## 出力形式',
     '次の JSON のみを出力（コードフェンス不要・日本語）:',
     '{"stance":"bullish|neutral|bearish","confidence":0-100の数値,"summary":"1〜2文の要約","reasons":["根拠を2〜4個"],"risks":["リスクを1〜3個"]}',
@@ -81,6 +105,11 @@ export default defineEventHandler(async (event): Promise<Insight> => {
     const sources = ['Vertex AI (Gemini) 分析', 'テクニカル指標・市場データ']
     if (news.length > 0) sources.push(`ニュース ${Math.min(news.length, 8)} 件（${[...new Set(news.slice(0, 8).map((n) => n.source))].join(' / ')}）`)
     if (strategy) sources.push(`戦略「${strategy.name}」`)
+    if (rag.docs.length > 0) {
+      sources.push(
+        `RAG 検索（${rag.method === 'vector' ? 'ベクトル' : 'キーワード'}）: ${rag.docs.map((d) => d.name).join(' / ')}`,
+      )
+    }
     return {
       assetId: ticker.assetId,
       horizon,

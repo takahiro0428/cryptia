@@ -1,13 +1,18 @@
 import { defineStore } from 'pinia'
 import { ASSETS } from '~/shared/assets'
+import { BINANCE_SYMBOLS, KLINE_PARAMS, netTakerFlowUsd, parseMiniTicker } from '~/shared/binance'
 import { CryptiaError, ERROR_CODES } from '~/shared/errors'
 import { mockTickers } from '~/shared/mockData'
 import type { FlowPeriod, FundFlow, Ticker } from '~/shared/types'
-import { estimateFlows } from '~/shared/flow'
+import { buildFlowMatrix, estimateFlows, heuristicNetUsd, type FlowEntry } from '~/shared/flow'
 
 const COINGECKO_URL = 'https://api.coingecko.com/api/v3/coins/markets'
-/** NFR: 価格更新間隔 15 秒（CoinGecko 無償枠のレートリミット内） */
+const BINANCE_API = 'https://api.binance.com/api/v3'
+const BINANCE_WS = 'wss://stream.binance.com:9443/stream'
+/** メタデータ（時価総額・スパークライン等）の更新間隔。価格ティックは WebSocket で即時 */
 export const POLL_INTERVAL_MS = 15_000
+/** 実測ネットフローのキャッシュ有効期間 */
+const NET_FLOW_TTL_MS = 5 * 60 * 1000
 
 interface CoinGeckoMarket {
   id: string
@@ -29,16 +34,37 @@ export const useMarketStore = defineStore('market', {
     usingMockData: false,
     lastUpdatedAt: 0,
     lastError: '' as string,
+    /** WebSocket ストリーミング接続状態（価格の即時更新） */
+    streaming: false,
+    /** 期間別の実測ネットフロー（Binance テイカーフロー） */
+    netFlows: {} as Partial<Record<FlowPeriod, { entries: FlowEntry[]; fetchedAt: number }>>,
+    netFlowLoading: false,
     _pollTimer: null as ReturnType<typeof setInterval> | null,
+    _ws: null as WebSocket | null,
+    _wsRetryTimer: null as ReturnType<typeof setTimeout> | null,
   }),
   getters: {
     tickerOf: (state) => (assetId: string) => state.tickers.find((t) => t.assetId === assetId),
     priceMap: (state): Record<string, number> =>
       Object.fromEntries(state.tickers.map((t) => [t.assetId, t.priceUsd])),
+    /**
+     * 銘柄間フロー。実測ネットフロー（Binance）があれば実測ベース、
+     * なければ従来の推定モデルへフォールバック（BR-5）。
+     */
     flowsFor:
       (state) =>
-      (period: FlowPeriod): FundFlow[] =>
-        estimateFlows(state.tickers, period),
+      (period: FlowPeriod): FundFlow[] => {
+        const measured = state.netFlows[period]
+        if (measured && measured.entries.some((e) => e.measured)) {
+          return buildFlowMatrix(measured.entries)
+        }
+        return estimateFlows(state.tickers, period)
+      },
+    /** フローのデータソース表示用（measured-hybrid: 実測+未上場銘柄の推定補完） */
+    flowSource:
+      (state) =>
+      (period: FlowPeriod): 'measured-hybrid' | 'estimated' =>
+        state.netFlows[period]?.entries.some((e) => e.measured) ? 'measured-hybrid' : 'estimated',
   },
   actions: {
     async fetchTickers() {
@@ -85,16 +111,132 @@ export const useMarketStore = defineStore('market', {
         this.loading = false
       }
     },
-    /** ポーリング開始（多重起動しない: 冪等） */
+    /** ポーリング開始（多重起動しない: 冪等）。同時に価格ストリーミングも開始する */
     startPolling() {
       if (this._pollTimer) return
       void this.fetchTickers()
       this._pollTimer = setInterval(() => void this.fetchTickers(), POLL_INTERVAL_MS)
+      this.startStreaming()
     },
     stopPolling() {
       if (this._pollTimer) {
         clearInterval(this._pollTimer)
         this._pollTimer = null
+      }
+      this.stopStreaming()
+    },
+    /**
+     * Binance miniTicker WebSocket による価格の即時更新（F-01 本格化）。
+     * CoinGecko ポーリングはメタデータ（時価総額・スパークライン）と
+     * Binance 未上場銘柄（株式トークン等）の価格を引き続き担う。
+     * 切断時は 5 秒後に自動再接続。失敗してもポーリングが継続するため劣化のみ（BR-5）。
+     */
+    startStreaming() {
+      if (this._ws || typeof WebSocket === 'undefined') return
+      const streams = Object.values(BINANCE_SYMBOLS)
+        .filter((s): s is string => s !== null)
+        .map((s) => `${s.toLowerCase()}@miniTicker`)
+        .join('/')
+      try {
+        const ws = new WebSocket(`${BINANCE_WS}?streams=${streams}`)
+        this._ws = ws
+        ws.onopen = () => {
+          this.streaming = true
+        }
+        ws.onmessage = (ev) => {
+          try {
+            const payload = JSON.parse(String(ev.data)) as { data?: unknown }
+            const tick = parseMiniTicker(payload.data)
+            if (!tick) return
+            const ticker = this.tickers.find((t) => t.assetId === tick.assetId)
+            if (ticker && !this.usingMockData) {
+              ticker.priceUsd = tick.priceUsd
+              ticker.change24hPct = tick.change24hPct
+              ticker.updatedAt = Date.now()
+              this.lastUpdatedAt = Date.now()
+            }
+          } catch {
+            /* 不正メッセージは無視 */
+          }
+        }
+        ws.onclose = () => {
+          this.streaming = false
+          this._ws = null
+          // 自動再接続（stopStreaming 済みならタイマーは張らない）
+          if (this._pollTimer && !this._wsRetryTimer) {
+            this._wsRetryTimer = setTimeout(() => {
+              this._wsRetryTimer = null
+              this.startStreaming()
+            }, 5_000)
+          }
+        }
+        ws.onerror = () => ws.close()
+      } catch {
+        this.streaming = false
+        this._ws = null
+      }
+    },
+    stopStreaming() {
+      if (this._wsRetryTimer) {
+        clearTimeout(this._wsRetryTimer)
+        this._wsRetryTimer = null
+      }
+      this._ws?.close()
+      this._ws = null
+      this.streaming = false
+    },
+    /**
+     * 実測ネットフローの取得（F-02 本格化）。
+     * Binance kline のテイカー買い/売り出来高から銘柄別の実測資金流入出を算出し、
+     * 未上場銘柄は推定値で補完する。失敗時は従来の推定モデルにフォールバック。
+     */
+    async fetchNetFlows(period: FlowPeriod) {
+      const cached = this.netFlows[period]
+      if (cached && Date.now() - cached.fetchedAt < NET_FLOW_TTL_MS) return
+      if (this.netFlowLoading) return
+      this.netFlowLoading = true
+      try {
+        const { interval, limit } = KLINE_PARAMS[period]
+        const mapped = ASSETS.map((a) => ({ assetId: a.id, symbol: BINANCE_SYMBOLS[a.id] }))
+        const results = await Promise.allSettled(
+          mapped.map(async ({ assetId, symbol }): Promise<FlowEntry | null> => {
+            if (!symbol) return null
+            const res = await fetch(
+              `${BINANCE_API}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+            )
+            if (!res.ok) throw new Error(`Binance HTTP ${res.status}`)
+            const klines = (await res.json()) as unknown[][]
+            return { assetId, netUsd: netTakerFlowUsd(klines), measured: true }
+          }),
+        )
+        const entries: FlowEntry[] = []
+        let measuredCount = 0
+        results.forEach((r, i) => {
+          if (r.status === 'fulfilled' && r.value) {
+            entries.push(r.value)
+            measuredCount++
+          } else {
+            // Binance 未上場・取得失敗の銘柄は推定値で補完する
+            const ticker = this.tickers.find((t) => t.assetId === mapped[i].assetId)
+            if (ticker) {
+              entries.push({
+                assetId: ticker.assetId,
+                netUsd: heuristicNetUsd(ticker, period),
+                measured: false,
+              })
+            }
+          }
+        })
+        // 実測が過半に満たない場合は全体を推定モデルに任せる（信頼性の混在を避ける）
+        if (measuredCount >= 5) {
+          this.netFlows[period] = { entries, fetchedAt: Date.now() }
+        }
+      } catch (err) {
+        console.warn(
+          `[${ERROR_CODES.MARKET_FETCH_FAILED}] ネットフロー取得失敗（推定モデルで継続）: ${err instanceof Error ? err.message : err}`,
+        )
+      } finally {
+        this.netFlowLoading = false
       }
     },
   },

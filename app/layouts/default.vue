@@ -1,14 +1,26 @@
 <script setup lang="ts">
+import {
+  Bot,
+  BookOpen,
+  ChartCandlestick,
+  FlaskConical,
+  Orbit,
+  TrendingUp,
+  Waves,
+  Zap,
+} from '@lucide/vue'
+
 // ナビゲーション定義。モバイルは主要5項目の下部タブ、PC は全項目のサイドナビ（原則8）。
+// アイコンは lucide（絵文字は使用しない: UI 品質ポリシー）
 const NAV_ITEMS = [
-  { to: '/', icon: '📊', label: 'マーケット', mobile: true },
-  { to: '/flows', icon: '🫧', label: 'フロー', mobile: true },
-  { to: '/insights', icon: '🤖', label: 'AI分析', mobile: true },
-  { to: '/trade', icon: '💹', label: 'トレード', mobile: true },
-  { to: '/strategy', icon: '📚', label: '戦略', mobile: true },
-  { to: '/trade/demo', icon: '🧪', label: 'デモトレード', mobile: false },
-  { to: '/trade/solana', icon: '🌊', label: 'Solana魔界', mobile: false },
-  { to: '/trade/live', icon: '⚡', label: '実トレード', mobile: false },
+  { to: '/', icon: markRaw(ChartCandlestick), label: 'マーケット', mobile: true },
+  { to: '/flows', icon: markRaw(Orbit), label: 'フロー', mobile: true },
+  { to: '/insights', icon: markRaw(Bot), label: 'AI分析', mobile: true },
+  { to: '/trade', icon: markRaw(TrendingUp), label: 'トレード', mobile: true },
+  { to: '/strategy', icon: markRaw(BookOpen), label: '戦略', mobile: true },
+  { to: '/trade/demo', icon: markRaw(FlaskConical), label: 'デモトレード', mobile: false },
+  { to: '/trade/solana', icon: markRaw(Waves), label: 'Solana魔界', mobile: false },
+  { to: '/trade/live', icon: markRaw(Zap), label: '実トレード', mobile: false },
 ]
 
 const route = useRoute()
@@ -29,7 +41,7 @@ function isActive(to: string): boolean {
       :to="item.to"
       :class="{ 'nav-active': isActive(item.to) }"
     >
-      <span class="icon">{{ item.icon }}</span>{{ item.label }}
+      <component :is="item.icon" :size="18" aria-hidden="true" />{{ item.label }}
     </NuxtLink>
   </nav>
 
@@ -44,7 +56,7 @@ function isActive(to: string): boolean {
       :to="item.to"
       :class="{ 'nav-active': item.to === '/trade' ? route.path.startsWith('/trade') : isActive(item.to) }"
     >
-      <span class="icon">{{ item.icon }}</span>
+      <component :is="item.icon" :size="21" aria-hidden="true" />
       <span>{{ item.label }}</span>
     </NuxtLink>
   </nav>

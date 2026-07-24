@@ -1,5 +1,5 @@
 import { ERROR_CODES } from '~/shared/errors'
-import type { NewsItem } from '~/shared/types'
+import type { Asset, NewsItem } from '~/shared/types'
 
 /**
  * ニュース/市場コンテキスト収集（F-10）。
@@ -101,15 +101,37 @@ export async function getMarketNews(): Promise<NewsItem[]> {
   const results = await Promise.allSettled([
     fetchRss('https://www.coindesk.com/arc/outboundfeeds/rss/', 'CoinDesk'),
     fetchRss('https://cointelegraph.com/rss', 'Cointelegraph'),
+    fetchRss('https://jp.cointelegraph.com/rss', 'Cointelegraph JP'),
+    fetchRss('https://coinpost.jp/?feed=rss2', 'CoinPost'),
+    fetchRss('https://decrypt.co/feed', 'Decrypt'),
     fetchCoinGeckoTrending(),
   ])
   const items = results
     .filter((r): r is PromiseFulfilledResult<NewsItem[]> => r.status === 'fulfilled')
     .flatMap((r) => r.value)
     .sort((a, b) => b.publishedAt - a.publishedAt)
-    .slice(0, 15)
+    .slice(0, 25)
   if (items.length > 0) {
     cache = { items, fetchedAt: Date.now() }
   }
   return items
+}
+
+/**
+ * 対象銘柄に関連する見出しを優先して並べ替える（F-10 本格化）。
+ * シンボル・英名・和名のいずれかを含む見出しを先頭グループに寄せる。
+ */
+export function filterNewsForAsset(items: NewsItem[], asset?: Asset): NewsItem[] {
+  if (!asset) return items
+  const terms = [asset.symbol, asset.name, asset.nameJa]
+    .filter((t) => t.length >= 2)
+    .map((t) => t.toLowerCase())
+  const related: NewsItem[] = []
+  const others: NewsItem[] = []
+  for (const item of items) {
+    const title = item.title.toLowerCase()
+    if (terms.some((t) => title.includes(t))) related.push(item)
+    else others.push(item)
+  }
+  return [...related, ...others]
 }

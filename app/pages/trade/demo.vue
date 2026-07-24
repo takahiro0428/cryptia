@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Bot, FlaskConical, Pause, Play, Square } from '@lucide/vue'
 import { ASSET_MAP, ASSETS } from '~/shared/assets'
 import { fmtPct, fmtQty, fmtTime, fmtUsd } from '~/shared/format'
 import { useDemoTradeStore, type EngineMode } from '~/stores/demoTrade'
@@ -50,8 +51,8 @@ useHead({ title: 'デモトレード | Cryptia' })
 <template>
   <div>
     <div class="card-title">
-      <h1>🧪 AI デモトレード</h1>
-      <span v-if="demo.running" class="badge badge-up">● 自動売買 実行中</span>
+      <h1><FlaskConical :size="20" class="icon-inline" aria-hidden="true" />AI デモトレード</h1>
+      <span v-if="demo.running" class="badge badge-up">自動売買 実行中</span>
     </div>
 
     <!-- 設定フォーム（セッション未開始時） -->
@@ -81,7 +82,9 @@ useHead({ title: 'デモトレード | Cryptia' })
       <div class="field">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
           <span class="small dim">取引対象銘柄（{{ selectedIds.length }} 選択中）</span>
-          <button class="btn btn-sm" type="button" @click="applyRecommendation">🤖 AI のおすすめを使う</button>
+          <button class="btn btn-sm" type="button" @click="applyRecommendation">
+            <Bot :size="14" aria-hidden="true" /> AI のおすすめを使う
+          </button>
         </div>
         <div v-if="recommendations.length > 0" class="rec-box small">
           <div v-for="r in recommendations" :key="r.assetId" class="xs dim">
@@ -109,7 +112,7 @@ useHead({ title: 'デモトレード | Cryptia' })
         :disabled="selectedIds.length === 0 || initialUsd < 100"
         @click="demo.start(initialUsd, selectedIds, engineMode)"
       >
-        ▶ デモトレードを開始
+        <Play :size="15" aria-hidden="true" /> デモトレードを開始
       </button>
     </section>
 
@@ -146,9 +149,15 @@ useHead({ title: 'デモトレード | Cryptia' })
         </div>
         <PriceChart v-if="equityValues.length >= 2" :values="equityValues" color="#22c58b" />
         <div class="controls">
-          <button v-if="demo.running" class="btn" type="button" @click="demo.stop()">⏸ 一時停止</button>
-          <button v-else class="btn btn-success" type="button" @click="demo.startTicking()">▶ 再開</button>
-          <button class="btn btn-danger" type="button" @click="demo.endSession()">■ セッション終了</button>
+          <button v-if="demo.running" class="btn" type="button" @click="demo.stop()">
+            <Pause :size="15" aria-hidden="true" /> 一時停止
+          </button>
+          <button v-else class="btn btn-success" type="button" @click="demo.startTicking()">
+            <Play :size="15" aria-hidden="true" /> 再開
+          </button>
+          <button class="btn btn-danger" type="button" @click="demo.endSession()">
+            <Square :size="14" aria-hidden="true" /> セッション終了
+          </button>
         </div>
       </section>
 

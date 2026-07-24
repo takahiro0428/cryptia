@@ -124,6 +124,7 @@ Cryptia アプリ（`app/` 配下、Firebase + GCP + Vertex AI 構成）では�
 | variable | `NUXT_PUBLIC_FIREBASE_DATABASE_ID` | Firestore の名前付きデータベース ID（既定 `cryptia`。共有プロジェクト同居のための専用 DB） |
 | variable | `FIREBASE_HOSTING_SITE` | 任意。デプロイ先 Hosting サイト名（共有プロジェクトでは専用サイトを指定。未設定時は既定サイト） |
 | variable | `DEPLOY_FIRESTORE_RULES` | 任意。`true` で firestore.rules をパイプラインからデプロイ（専用 DB のみに適用されるため共有プロジェクトでも安全。要: DB 作成済み） |
+| variable | `NUXT_AI_REQUIRE_AUTH` | 任意。`true` で AI API を認証必須化（未認証は 401。既定は匿名許可 + 低レート枠 20/分、認証済みは 40/分） |
 | secret | `DEPLOY_TOKEN` | Firebase/GCP **サービスアカウント JSON キーの全文** |
 | secret | `DEPLOY_TARGET` | Firebase プロジェクト ID |
 

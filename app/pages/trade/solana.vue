@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Bot, Pause, Play, Square, TriangleAlert, Waves } from '@lucide/vue'
 import { fmtAgo, fmtPct, fmtUsd } from '~/shared/format'
 import { useSolanaStore, type DegenMethod } from '~/stores/solana'
 import { useStrategyStore } from '~/stores/strategy'
@@ -53,15 +54,17 @@ useHead({ title: 'Solana魔界 | Cryptia' })
 <template>
   <div>
     <div class="card-title">
-      <h1>🌊 Solana 魔界トレード</h1>
-      <span v-if="solana.running" class="badge badge-up">● 実行中</span>
+      <h1><Waves :size="20" class="icon-inline" aria-hidden="true" />Solana 魔界トレード</h1>
+      <span v-if="solana.running" class="badge badge-up">実行中</span>
     </div>
     <div class="disclaimer" role="note">
-      ⚠️ 対象は流動性の低い超高リスクトークンです。取引はデモ資金で実行されます（実資金の取引は
+      <TriangleAlert :size="14" class="icon-inline" aria-hidden="true" />
+      対象は流動性の低い超高リスクトークンです。取引はデモ資金で実行されます（実資金の取引は
       <NuxtLink to="/trade/live">実トレード</NuxtLink> から）。
     </div>
     <div v-if="solana.usingMockData" class="disclaimer" role="alert">
-      ⚠️ DexScreener に接続できないため参考データ（モック）を表示しています。
+      <TriangleAlert :size="14" class="icon-inline" aria-hidden="true" />
+      DexScreener に接続できないため参考データ（モック）を表示しています。
     </div>
 
     <!-- セッション設定 -->
@@ -94,7 +97,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
           <span class="small dim">対象トークン（{{ selectedPairs.length }} 選択中）</span>
           <button class="btn btn-sm" type="button" :disabled="solana.recommended.length === 0" @click="applyRecommendation">
-            🤖 AI のおすすめを使う
+            <Bot :size="14" aria-hidden="true" /> AI のおすすめを使う
           </button>
         </div>
       </div>
@@ -105,7 +108,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         :disabled="selectedPairs.length === 0 || allocatedUsd < 100"
         @click="solana.start(allocatedUsd, selectedPairs, method)"
       >
-        ▶ 魔界トレードを開始
+        <Play :size="15" aria-hidden="true" /> 魔界トレードを開始
       </button>
     </section>
 
@@ -145,9 +148,15 @@ useHead({ title: 'Solana魔界 | Cryptia' })
       </div>
 
       <div class="controls">
-        <button v-if="solana.running" class="btn" type="button" @click="solana.stop()">⏸ 一時停止</button>
-        <button v-else class="btn btn-success" type="button" @click="solana.startTicking()">▶ 再開</button>
-        <button class="btn btn-danger" type="button" @click="solana.endSession()">■ セッション終了</button>
+        <button v-if="solana.running" class="btn" type="button" @click="solana.stop()">
+          <Pause :size="15" aria-hidden="true" /> 一時停止
+        </button>
+        <button v-else class="btn btn-success" type="button" @click="solana.startTicking()">
+          <Play :size="15" aria-hidden="true" /> 再開
+        </button>
+        <button class="btn btn-danger" type="button" @click="solana.endSession()">
+          <Square :size="14" aria-hidden="true" /> セッション終了
+        </button>
       </div>
 
       <h3 style="margin-top: 14px">約定・イベント履歴</h3>

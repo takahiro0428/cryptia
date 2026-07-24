@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { TriangleAlert } from '@lucide/vue'
 import { fmtPct, fmtUsd } from '~/shared/format'
 import { isTradable } from '~/shared/solanaScoring'
 import type { TokenScore } from '~/shared/types'
@@ -36,7 +37,9 @@ const scoreColor = computed(() =>
         {{ tradable ? '取引適格' : '基準未達' }}
       </span>
       <span class="dim">{{ t.ageHours < 24 ? `${t.ageHours.toFixed(0)}h` : `${(t.ageHours / 24).toFixed(0)}日` }}</span>
-      <span v-if="score.warnings.length > 0" class="badge badge-warn">⚠ {{ score.warnings.length }}</span>
+      <span v-if="score.warnings.length > 0" class="badge badge-warn" style="display: inline-flex; align-items: center; gap: 3px">
+        <TriangleAlert :size="12" aria-hidden="true" /> {{ score.warnings.length }}
+      </span>
     </div>
     <div v-if="score.warnings.length > 0" class="xs down warnings">
       {{ score.warnings[0] }}<span v-if="score.warnings.length > 1"> 他{{ score.warnings.length - 1 }}件</span>

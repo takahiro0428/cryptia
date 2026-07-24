@@ -37,8 +37,10 @@ let height = 0
 let particlePhase = 0
 
 function nodeRadius(t: Ticker, maxMcap: number, minDim: number): number {
-  const ratio = Math.sqrt(Math.max(t.marketCapUsd, 1) / Math.max(maxMcap, 1))
-  return Math.max(minDim * 0.028, ratio * minDim * 0.13)
+  // べき 0.4 で時価総額の桁差を圧縮する（線形/平方根では BTC が支配的になり
+  // 小型銘柄がラベル未満のサイズに潰れるため）
+  const ratio = (Math.max(t.marketCapUsd, 1) / Math.max(maxMcap, 1)) ** 0.4
+  return minDim * (0.038 + ratio * 0.085)
 }
 
 /** ティッカー更新時にノードを同期（既存ノードの位置は保持: 状態保護） */
@@ -49,11 +51,13 @@ function syncNodes() {
   nodes = props.tickers.map((t, i) => {
     const asset = ASSET_MAP[t.assetId]
     const prev = existing.get(t.assetId)
+    // 初期配置は画面全体に広がる二重リング（中央密集を防ぐ）
     const angle = (i / Math.max(props.tickers.length, 1)) * Math.PI * 2
+    const ring = i % 2 === 0 ? 0.32 : 0.55
     return {
       id: t.assetId,
-      x: prev?.x ?? width / 2 + Math.cos(angle) * minDim * 0.3,
-      y: prev?.y ?? height / 2 + Math.sin(angle) * minDim * 0.3,
+      x: prev?.x ?? width / 2 + Math.cos(angle) * width * ring * 0.45,
+      y: prev?.y ?? height / 2 + Math.sin(angle) * height * ring * 0.42,
       vx: prev?.vx ?? 0,
       vy: prev?.vy ?? 0,
       r: nodeRadius(t, maxMcap, minDim),
@@ -68,11 +72,11 @@ function physicsStep() {
   const cx = width / 2
   const cy = height / 2
   for (const n of nodes) {
-    // 中心へのゆるい引力
-    n.vx += (cx - n.x) * 0.0012
-    n.vy += (cy - n.y) * 0.0012
+    // 中心へのごく弱い引力（強すぎると全バブルが中央に密集して読めなくなる）
+    n.vx += (cx - n.x) * 0.00035
+    n.vy += (cy - n.y) * 0.00035
   }
-  // 反発（バブル同士の重なり解消）
+  // 反発（バブル同士の重なり解消 + ラベルが読める余白の確保）
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i]
@@ -80,9 +84,9 @@ function physicsStep() {
       const dx = b.x - a.x
       const dy = b.y - a.y
       const dist = Math.hypot(dx, dy) || 0.01
-      const minDist = a.r + b.r + 14
+      const minDist = a.r + b.r + Math.min(width, height) * 0.06
       if (dist < minDist) {
-        const push = ((minDist - dist) / dist) * 0.06
+        const push = ((minDist - dist) / dist) * 0.1
         a.vx -= dx * push
         a.vy -= dy * push
         b.vx += dx * push
@@ -90,20 +94,22 @@ function physicsStep() {
       }
     }
   }
-  // フローで結ばれたバブルは弱く引き寄せ合う（資金経路が空間的に近づく）
+  // フローで結ばれたバブルはごく弱く引き寄せ合う（反発より常に弱く保つ）
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const maxAmount = Math.max(...props.flows.map((f) => f.amountUsd), 1)
   for (const f of props.flows) {
     const a = byId.get(f.fromAssetId)
     const b = byId.get(f.toAssetId)
     if (!a || !b) continue
-    const strength = 0.0004 * (f.amountUsd / maxAmount)
+    const strength = 0.00012 * (f.amountUsd / maxAmount)
     a.vx += (b.x - a.x) * strength
     a.vy += (b.y - a.y) * strength
     b.vx += (a.x - b.x) * strength
     b.vy += (a.y - b.y) * strength
   }
   for (const n of nodes) {
+    // ドラッグ中のバブルはポインタ追従が優先（物理積分をスキップ）
+    if (n.id === dragId) continue
     n.vx *= 0.9
     n.vy *= 0.9
     n.x += n.vx
@@ -224,14 +230,56 @@ function resize() {
   syncNodes()
 }
 
-function onPointer(e: PointerEvent) {
-  const canvas = canvasRef.value
-  if (!canvas) return
-  const rect = canvas.getBoundingClientRect()
-  const x = e.clientX - rect.left
-  const y = e.clientY - rect.top
+// --- ドラッグ / タッチ操作 ---
+// ドラッグでバブルを引っ張って投げられる。移動が小さい場合はタップ = 選択として扱う。
+let dragId: string | null = null
+let dragMoved = 0
+let lastPointer = { x: 0, y: 0 }
+
+function canvasPos(e: PointerEvent): { x: number; y: number } {
+  const rect = canvasRef.value!.getBoundingClientRect()
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (!canvasRef.value) return
+  const { x, y } = canvasPos(e)
+  lastPointer = { x, y }
+  dragMoved = 0
   const hit = nodes.find((n) => Math.hypot(n.x - x, n.y - y) <= n.r + 6)
-  emit('select', hit ? hit.id : null)
+  if (hit) {
+    dragId = hit.id
+    canvasRef.value.setPointerCapture(e.pointerId)
+  }
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!dragId || !canvasRef.value) return
+  const { x, y } = canvasPos(e)
+  dragMoved += Math.hypot(x - lastPointer.x, y - lastPointer.y)
+  const n = nodes.find((v) => v.id === dragId)
+  if (n) {
+    // 離した瞬間に慣性で飛ぶよう、追従差分を速度として蓄える
+    n.vx = (x - n.x) * 0.35
+    n.vy = (y - n.y) * 0.35
+    n.x = Math.max(n.r, Math.min(width - n.r, x))
+    n.y = Math.max(n.r, Math.min(height - n.r, y))
+  }
+  lastPointer = { x, y }
+  e.preventDefault()
+}
+
+function onPointerUp(e: PointerEvent) {
+  const wasDragging = dragId
+  const { x, y } = canvasPos(e)
+  if (wasDragging) {
+    // 移動量が小さければタップ = 選択
+    if (dragMoved < 8) emit('select', wasDragging)
+  } else {
+    const hit = nodes.find((n) => Math.hypot(n.x - x, n.y - y) <= n.r + 6)
+    emit('select', hit ? hit.id : null)
+  }
+  dragId = null
 }
 
 let resizeObserver: ResizeObserver | null = null
@@ -256,8 +304,11 @@ watch(
     <canvas
       ref="canvasRef"
       role="img"
-      aria-label="銘柄間の資金フローを示すバブルマップ"
-      @pointerdown="onPointer"
+      aria-label="銘柄間の資金フローを示すバブルマップ。ドラッグでバブルを移動できます"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="dragId = null"
     />
   </div>
 </template>
@@ -269,7 +320,12 @@ watch(
   overflow: hidden;
   background: radial-gradient(ellipse at 50% 30%, #101830 0%, #0b1020 70%);
   border: 1px solid var(--border);
-  touch-action: manipulation;
 }
-canvas { display: block; }
+canvas {
+  display: block;
+  /* ドラッグ操作を優先（マップ上ではスクロールより操作性を優先する） */
+  touch-action: none;
+  cursor: grab;
+}
+canvas:active { cursor: grabbing; }
 </style>

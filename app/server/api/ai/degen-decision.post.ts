@@ -4,8 +4,9 @@ import { scoreToken } from '~/shared/solanaScoring'
 import { clamp } from '~/shared/ta'
 import type { SolanaToken, TradeDecision } from '~/shared/types'
 import { untrustedBlock } from '../../utils/prompt'
+import { retrieveRelevantStrategies } from '../../utils/rag'
 import { generateWithVertex, parseJsonResponse } from '../../utils/vertex'
-import { badRequest, validateStrategy } from '../../utils/validation'
+import { badRequest, validateStrategy, validateStrategyLibrary } from '../../utils/validation'
 
 /** Solana トークン入力の検証（銘柄マスタ外のため個別に検証する） */
 function validateToken(value: unknown): SolanaToken {
@@ -50,6 +51,7 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
   const token = validateToken(body?.token)
   const strategy = validateStrategy(body?.strategy)
   if (!strategy) badRequest('strategy は必須です')
+  const library = validateStrategyLibrary(body?.library)
 
   const exposureRatio = typeof body?.exposureRatio === 'number' ? clamp(body.exposureRatio, 0, 1) : 0
   const unrealizedPct =
@@ -58,6 +60,12 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
       : null
 
   const score = scoreToken(token)
+  // ベクトル RAG: 関連ノウハウを検索して文脈注入（F-09 本格化）
+  const rag = await retrieveRelevantStrategies(
+    library,
+    `solana 草コイン 魔界 ミームコイン ラダー 損切り ${unrealizedPct !== null ? '利確' : 'エントリー'}`,
+    { excludeId: strategy!.id },
+  )
   const prompt = [
     'あなたは Solana チェーンの新興トークン（ミームコイン）を扱うリスク管理最優先のトレーディング AI です。',
     '対象は極めて投機的であり、資金保全を第一に判断してください。',
@@ -76,6 +84,15 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
       `戦略名: ${strategy.name}\nリスク許容度: ${strategy.riskLevel}/5\n${strategy.content}`,
     ),
     '',
+    ...(rag.docs.length > 0
+      ? [
+          untrustedBlock(
+            '参考: 戦略ライブラリから検索された関連ノウハウ（補助的な判断材料）',
+            rag.docs.map((d) => `【${d.name}】\n${d.content}`).join('\n\n'),
+          ),
+          '',
+        ]
+      : []),
     '## ルール',
     '- sizeRatio は 0〜0.1（1トークンへの投入は割当資金の10%まで）',
     '- 損切りライン到達時は必ず sell を選ぶこと',

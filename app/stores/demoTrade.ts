@@ -10,6 +10,7 @@ import {
   summarize,
 } from '~/shared/tradeEngine'
 import type { Portfolio, PortfolioSummary, TradeDecision } from '~/shared/types'
+import { aiAuthHeaders } from '~/composables/useFirebase'
 import { persist, restore } from '~/composables/usePersistence'
 import { useMarketStore } from '~/stores/market'
 import { useStrategyStore } from '~/stores/strategy'
@@ -195,7 +196,14 @@ export const useDemoTradeStore = defineStore('demoTrade', {
             try {
               decision = await $fetch<TradeDecision>('/api/ai/decision', {
                 method: 'POST',
-                body: { ticker, strategy, exposureRatio, unrealizedPct },
+                body: {
+                  ticker,
+                  strategy,
+                  exposureRatio,
+                  unrealizedPct,
+                  library: strategyStore.allDocs.slice(0, 10),
+                },
+                headers: await aiAuthHeaders(),
                 timeout: 12_000,
               })
             } catch {

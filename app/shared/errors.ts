@@ -18,6 +18,10 @@ export const ERROR_CODES = {
   INVALID_INPUT: 'CRYPTIA-E301',
   /** AI API のレートリミット超過（時間をおいて再試行） */
   RATE_LIMITED: 'CRYPTIA-E302',
+  /** AI API の認証必須環境で未認証リクエストを拒否 */
+  AUTH_REQUIRED: 'CRYPTIA-E303',
+  /** アカウントリンク（匿名→Google）に失敗 */
+  ACCOUNT_LINK_FAILED: 'CRYPTIA-E602',
   /** デモトレード: 資金不足で注文を拒否 */
   INSUFFICIENT_FUNDS: 'CRYPTIA-E401',
   /** デモトレード: 保有数量不足で売り注文を拒否 */

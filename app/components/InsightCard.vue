@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Minus, TrendingDown, TrendingUp } from '@lucide/vue'
 import { fmtAgo } from '~/shared/format'
 import type { Insight } from '~/shared/types'
 
@@ -7,11 +8,11 @@ const props = defineProps<{ insight: Insight }>()
 const stanceMeta = computed(() => {
   switch (props.insight.stance) {
     case 'bullish':
-      return { label: '強気', cls: 'badge-up', icon: '📈' }
+      return { label: '強気', cls: 'badge-up', icon: markRaw(TrendingUp) }
     case 'bearish':
-      return { label: '弱気', cls: 'badge-down', icon: '📉' }
+      return { label: '弱気', cls: 'badge-down', icon: markRaw(TrendingDown) }
     default:
-      return { label: '中立', cls: 'badge-accent', icon: '➖' }
+      return { label: '中立', cls: 'badge-accent', icon: markRaw(Minus) }
   }
 })
 </script>
@@ -19,8 +20,8 @@ const stanceMeta = computed(() => {
 <template>
   <div class="card">
     <div class="card-title">
-      <span class="badge" :class="stanceMeta.cls" style="font-size: 0.85rem">
-        {{ stanceMeta.icon }} {{ stanceMeta.label }}
+      <span class="badge" :class="stanceMeta.cls" style="font-size: 0.85rem; display: inline-flex; align-items: center; gap: 4px">
+        <component :is="stanceMeta.icon" :size="15" aria-hidden="true" /> {{ stanceMeta.label }}
       </span>
       <span class="small dim mono">確信度 {{ insight.confidence }}%</span>
     </div>

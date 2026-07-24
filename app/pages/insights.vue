@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Newspaper, RefreshCw } from '@lucide/vue'
 import { ASSET_MAP, ASSETS } from '~/shared/assets'
 import { fmtAgo } from '~/shared/format'
 import type { Horizon } from '~/shared/types'
@@ -85,7 +86,8 @@ useHead({ title: 'AI分析 | Cryptia' })
       <InsightCard :insight="currentInsight" />
       <div style="display: flex; justify-content: flex-end; margin-top: 8px">
         <button class="btn btn-sm" type="button" :disabled="loading" @click="load(true)">
-          {{ loading ? '生成中…' : '🔄 再生成' }}
+          <RefreshCw :size="14" aria-hidden="true" />
+          {{ loading ? '生成中…' : '再生成' }}
         </button>
       </div>
     </template>
@@ -94,7 +96,7 @@ useHead({ title: 'AI分析 | Cryptia' })
     <!-- ニュースコンテキスト（AI が参照する情報源の透明化: BR-4） -->
     <section class="card" style="margin-top: 16px">
       <div class="card-title">
-        <h2>📰 市場ニュース</h2>
+        <h2><Newspaper :size="17" class="icon-inline" aria-hidden="true" />市場ニュース</h2>
         <span class="xs faint">AI 分析の参照ソース</span>
       </div>
       <ul v-if="insights.news.length > 0" class="news-list">
