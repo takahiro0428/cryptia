@@ -53,6 +53,30 @@ function getPhantom(): PhantomProvider | null {
 }
 
 /**
+ * 取引レコードの厳格検証（AUDIT-11）。
+ * インポート・復元経路で不正値（approxUsd 欠落/NaN 等）が混入すると
+ * 日次上限ガードの合計が NaN 化してバイパスされるため、型と値を全件検証する。
+ */
+function isValidTradeRecord(t: unknown): t is LiveTradeRecord {
+  if (typeof t !== 'object' || t === null) return false
+  const r = t as Record<string, unknown>
+  return (
+    typeof r.txid === 'string' &&
+    r.txid.length > 0 &&
+    typeof r.at === 'number' &&
+    Number.isFinite(r.at) &&
+    (r.side === 'buy' || r.side === 'sell') &&
+    typeof r.approxUsd === 'number' &&
+    Number.isFinite(r.approxUsd) &&
+    r.approxUsd >= 0 &&
+    typeof r.inAmountSol === 'number' &&
+    Number.isFinite(r.inAmountSol) &&
+    r.inAmountSol >= 0 &&
+    typeof r.outSymbol === 'string'
+  )
+}
+
+/**
  * ウォレット接続・実トレードストア（UC-6 / F-07, F-08）。
  * - 秘密鍵は一切保持しない。署名は Phantom ウォレット内で完結（BR-1）
  * - 取引はリスク同意 + 上限設定のガードを通過した場合のみ（BR-2）
@@ -85,7 +109,8 @@ export const useWalletStore = defineStore('wallet', {
       const guard = await restore<TradeGuardConfig>(GUARD_KEY)
       if (guard) this.guard = { ...DEFAULT_GUARD, ...guard }
       const log = await restore<LiveTradeRecord[]>(LOG_KEY)
-      if (log) this.tradeLog = log
+      // 復元時も全件検証する（改竄・破損レコードによるガード無効化を防ぐ: AUDIT-11）
+      if (Array.isArray(log)) this.tradeLog = log.filter(isValidTradeRecord)
       this.restored = true
     },
     async connect() {
@@ -195,10 +220,11 @@ export const useWalletStore = defineStore('wallet', {
       }
       this.busy = true
       try {
-        // 他タブが約定させたログを取り込んでから日次消費を判定する（AUDIT-7）
+        // 他タブが約定させたログを取り込んでから日次消費を判定する（AUDIT-7）。
+        // 取り込み時も全件検証する（AUDIT-11）
         const latest = loadLocal<LiveTradeRecord[]>(LOG_KEY)
-        if (latest && latest.data.length > this.tradeLog.length) {
-          this.tradeLog = latest.data
+        if (latest && Array.isArray(latest.data) && latest.data.length > this.tradeLog.length) {
+          this.tradeLog = latest.data.filter(isValidTradeRecord)
         }
         // 安全ガード（BR-2）: 同意・上限を検証。当日消費は取引ログの概算 USD 合計
         assertTradeAllowed(this.guard, meta.approxUsd, this.todaysSpentUsd, { auto: meta.auto })
@@ -263,16 +289,13 @@ export const useWalletStore = defineStore('wallet', {
     /** エクスポート JSON の取り込み。txid で重複排除し追記のみ（BR-7）。取込件数を返す */
     importLog(json: string): number {
       try {
-        const parsed = JSON.parse(json) as { tradeLog?: LiveTradeRecord[] }
+        const parsed = JSON.parse(json) as { tradeLog?: unknown[] }
         if (!Array.isArray(parsed.tradeLog)) return 0
         const known = new Set(this.tradeLog.map((t) => t.txid))
-        const added = parsed.tradeLog.filter(
-          (t) =>
-            t &&
-            typeof t.txid === 'string' &&
-            typeof t.at === 'number' &&
-            !known.has(t.txid),
-        )
+        // 全フィールドを厳格検証（不正レコードで日次ガードを NaN 化させない: AUDIT-11）
+        const added = parsed.tradeLog
+          .filter(isValidTradeRecord)
+          .filter((t) => !known.has(t.txid))
         if (added.length > 0) {
           this.tradeLog = [...added, ...this.tradeLog]
             .sort((a, b) => b.at - a.at)

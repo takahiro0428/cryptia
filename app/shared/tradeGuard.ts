@@ -33,6 +33,14 @@ export function assertTradeAllowed(
   if (!Number.isFinite(notionalUsd) || notionalUsd <= 0) {
     throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '取引金額は正の数値で指定してください')
   }
+  // 当日消費が NaN 等の場合、比較が常に false になり上限ガードが無効化されるため
+  // 安全側（拒否）に倒す（AUDIT-11: 多層防御の最終段）
+  if (!Number.isFinite(todaysSpentUsd) || todaysSpentUsd < 0) {
+    throw new CryptiaError(
+      ERROR_CODES.INVALID_INPUT,
+      '当日の取引実績を検証できないため注文を拒否しました（取引履歴の破損の可能性があります）',
+    )
+  }
   if (config.riskConsentAt === null) {
     throw new CryptiaError(
       ERROR_CODES.TRADE_GUARD_BLOCKED,

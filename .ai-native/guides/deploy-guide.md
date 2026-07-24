@@ -113,6 +113,7 @@ Cryptia アプリ（`app/` 配下、Firebase + GCP + Vertex AI 構成）では�
 | variable | `SCENARIO_TEST_CMD` | `cd app && pnpm run test:scenario` |
 | variable | `DEPLOY_CMD` | `bash scripts/deploy-firebase.sh`（ビルド + Hosting/Functions/Rules デプロイ) |
 | variable | `NUXT_VERTEX_LOCATION` / `NUXT_VERTEX_MODEL` | Vertex AI のリージョン・モデル名 |
+| variable | `NUXT_TRUSTED_PROXY_HOPS` | 任意。AI API レートリミットが X-Forwarded-For の右端から数えるホップ数（既定 1。Hosting CDN 経由の構成で実クライアント IP がずれる場合に 2 を設定） |
 | variable | `NUXT_PUBLIC_FIREBASE_API_KEY` ほか `NUXT_PUBLIC_FIREBASE_*` | Firebase Web 設定（公開可能な識別子） |
 | secret | `DEPLOY_TOKEN` | Firebase/GCP **サービスアカウント JSON キーの全文** |
 | secret | `DEPLOY_TARGET` | Firebase プロジェクト ID |

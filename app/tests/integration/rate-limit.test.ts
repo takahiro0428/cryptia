@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   consumeToken,
+  MAX_BUCKETS,
   pruneBuckets,
   RATE_LIMIT_MAX,
   RATE_LIMIT_WINDOW_MS,
@@ -40,5 +41,17 @@ describe('AI API レートリミッタ', () => {
     pruneBuckets(now + RATE_LIMIT_WINDOW_MS * 3)
     // 掃除後は新規ウィンドウとして扱われる
     expect(consumeToken('ip-old', now + RATE_LIMIT_WINDOW_MS * 3)).toBe(true)
+  })
+
+  it('キー偽装によるバケット無限増加はフェイルクローズで抑止される（AUDIT-10 回帰）', () => {
+    const now = 5_000_000
+    // ウィンドウ内で MAX_BUCKETS まで異なるキーを消費
+    for (let i = 0; i < MAX_BUCKETS; i++) {
+      consumeToken(`spoofed-${i}`, now)
+    }
+    // 期限切れが存在しない状態での新規キーは拒否される（メモリ枯渇防止）
+    expect(consumeToken('spoofed-overflow', now)).toBe(false)
+    // ウィンドウ経過後は掃除されて受け付ける
+    expect(consumeToken('spoofed-overflow', now + RATE_LIMIT_WINDOW_MS * 2 + 1)).toBe(true)
   })
 })

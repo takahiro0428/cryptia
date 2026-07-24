@@ -58,4 +58,14 @@ describe('実トレード安全ガード（shared/tradeGuard）', () => {
       expect.objectContaining({ code: ERROR_CODES.INVALID_INPUT }),
     )
   })
+
+  it('当日消費が NaN/負値なら拒否する（AUDIT-11 回帰: ガードの NaN 化バイパス防止）', () => {
+    expect(() => assertTradeAllowed(readyGuard, 10, Number.NaN, { auto: false })).toThrowError(
+      expect.objectContaining({ code: ERROR_CODES.INVALID_INPUT }),
+    )
+    expect(() => assertTradeAllowed(readyGuard, 10, -5, { auto: false })).toThrowError(
+      expect.objectContaining({ code: ERROR_CODES.INVALID_INPUT }),
+    )
+    expect(() => assertTradeAllowed(readyGuard, 10, 0, { auto: false })).not.toThrow()
+  })
 })

@@ -18,10 +18,19 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>()
 
+/** バケット数の上限（キー偽装によるメモリ増加ベクタの抑止: AUDIT-10） */
+export const MAX_BUCKETS = 10_000
+
 /** 上限内なら消費して true、超過なら false を返す。 */
 export function consumeToken(key: string, now = Date.now()): boolean {
   const bucket = buckets.get(key)
   if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    if (!bucket && buckets.size >= MAX_BUCKETS) {
+      // まず期限切れを掃除し、それでも満杯なら新規キーを拒否する
+      // （フェイルクローズ: メモリ枯渇より正規ユーザーの一時 429 を優先）
+      pruneBuckets(now)
+      if (buckets.size >= MAX_BUCKETS) return false
+    }
     buckets.set(key, { count: 1, windowStart: now })
     return true
   }

@@ -56,9 +56,10 @@ export default defineEventHandler(async (event): Promise<Insight> => {
     '',
     ...(strategy
       ? [
+          // 戦略名もユーザー入力のためフェンス内に置く（ISSUE-10: ラベル行への注入防止）
           untrustedBlock(
-            `ユーザーのトレード戦略「${strategy.name}」（リスク許容度 ${strategy.riskLevel}/5）— 売買方針の判断材料として整合性を考慮すること`,
-            strategy.content,
+            'ユーザーのトレード戦略 — 売買方針の判断材料として整合性を考慮すること',
+            `戦略名: ${strategy.name}\nリスク許容度: ${strategy.riskLevel}/5\n${strategy.content}`,
           ),
           '',
         ]

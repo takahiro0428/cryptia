@@ -47,6 +47,9 @@ echo "▶ Functions ランタイム設定を生成"
   echo "NUXT_GCP_PROJECT_ID=$DEPLOY_TARGET"
   [ -n "${NUXT_VERTEX_LOCATION:-}" ] && echo "NUXT_VERTEX_LOCATION=$NUXT_VERTEX_LOCATION"
   [ -n "${NUXT_VERTEX_MODEL:-}" ] && echo "NUXT_VERTEX_MODEL=$NUXT_VERTEX_MODEL"
+  # レートリミットの信頼プロキシホップ数（既定 1。Hosting CDN 経由で XFF に
+  # ホップが加わる構成では 2 を設定。server/middleware/ai-rate-limit.ts 参照）
+  [ -n "${NUXT_TRUSTED_PROXY_HOPS:-}" ] && echo "NUXT_TRUSTED_PROXY_HOPS=$NUXT_TRUSTED_PROXY_HOPS"
 } > app/.output/server/.env
 
 # --- デプロイ ---
