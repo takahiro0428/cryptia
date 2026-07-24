@@ -18,6 +18,14 @@ const isMeasured = computed(() => market.flowSource(period.value) === 'measured-
 // 実測ネットフロー（Binance テイカーフロー）を期間切替時に取得
 watch(period, (p) => void market.fetchNetFlows(p), { immediate: true })
 
+// バブル選択時、内訳パネルを視界に入るまで追従スクロール（マップ下にあり気付けないため）
+const detailRef = ref<HTMLElement | null>(null)
+watch(selectedId, async (id) => {
+  if (!id) return
+  await nextTick()
+  detailRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+})
+
 const selectedAsset = computed(() => (selectedId.value ? ASSET_MAP[selectedId.value] : undefined))
 const selectedNet = computed(() =>
   selectedId.value ? netFlows.value.get(selectedId.value) : undefined,
@@ -86,8 +94,8 @@ useHead({ title: '資金フロー | Cryptia' })
       @select="(id) => (selectedId = id)"
     />
 
-    <!-- 選択バブルの内訳（UC-2: タップで流入・流出の内訳） -->
-    <section v-if="selectedAsset" class="card" style="margin-top: 12px">
+    <!-- 選択バブルの内訳（UC-2: タップで流入・流出の内訳。閉じるのはボタンのみ） -->
+    <section v-if="selectedAsset" ref="detailRef" class="card" style="margin-top: 12px">
       <div class="card-title">
         <h2>
           <span :style="{ color: selectedAsset.color }">{{ selectedAsset.symbol }}</span>

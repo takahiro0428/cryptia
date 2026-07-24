@@ -242,6 +242,12 @@ h1 .icon-inline, h2 .icon-inline { vertical-align: -3px; margin-right: 6px; colo
   padding: 10px 14px;
   font-size: 0.85rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  cursor: pointer; /* タップで即時閉じられる */
+  animation: toast-in 0.2s ease;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .toast.error { border-left-color: var(--down); }
 .toast.warn { border-left-color: var(--warn); }
@@ -255,6 +261,28 @@ h1 .icon-inline, h2 .icon-inline { vertical-align: -3px; margin-right: 6px; colo
   font-size: 0.78rem;
   padding: 8px 12px;
   margin-bottom: 12px;
+}
+
+/* ---- ページ遷移（軽いフェード + スライド） ---- */
+.page-enter-active,
+.page-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
+.page-enter-from { opacity: 0; transform: translateY(6px); }
+.page-leave-to { opacity: 0; transform: translateY(-4px); }
+
+/* ---- キーボード操作のフォーカスリング（PC アクセシビリティ） ---- */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---- モーション低減設定の尊重 ---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* ---- スケルトン ---- */

@@ -22,6 +22,19 @@ function applyRecommendation() {
   selectedPairs.value = solana.recommended.slice(0, 3).map((s) => s.token.pairAddress)
 }
 
+/** 開始後はダッシュボード（ページ上部に描画）へ視点を移動する */
+async function startSession() {
+  await solana.start(allocatedUsd.value, selectedPairs.value, method.value)
+  if (solana.portfolio) window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+/** セッション終了の誤タップ防止 */
+function confirmEndSession() {
+  if (window.confirm('魔界トレードのセッションを終了しますか？\n実行中の自動取引が停止し、結果はアーカイブに保存されます。')) {
+    solana.endSession()
+  }
+}
+
 const equityValues = computed(() => solana.portfolio?.equityCurve.map((p) => p.equityUsd) ?? [])
 const positionRows = computed(() => {
   return (solana.portfolio?.positions ?? []).map((p) => {
@@ -106,7 +119,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         style="width: 100%"
         type="button"
         :disabled="selectedPairs.length === 0 || allocatedUsd < 100"
-        @click="solana.start(allocatedUsd, selectedPairs, method)"
+        @click="startSession"
       >
         <Play :size="15" aria-hidden="true" /> 魔界トレードを開始
       </button>
@@ -154,7 +167,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         <button v-else class="btn btn-success" type="button" @click="solana.startTicking()">
           <Play :size="15" aria-hidden="true" /> 再開
         </button>
-        <button class="btn btn-danger" type="button" @click="solana.endSession()">
+        <button class="btn btn-danger" type="button" @click="confirmEndSession">
           <Square :size="14" aria-hidden="true" /> セッション終了
         </button>
       </div>

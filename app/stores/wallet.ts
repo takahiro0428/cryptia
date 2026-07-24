@@ -224,6 +224,9 @@ export const useWalletStore = defineStore('wallet', {
           queryProgram(TOKEN_PROGRAM_ID),
           queryProgram(TOKEN_2022_PROGRAM_ID),
         ])
+        // 全プログラムのクエリが失敗した場合は前回の残高を保持する
+        // （一時的な RPC 障害で売りタブが空に巻き戻るのを防ぐ: ISSUE-P8-15 / 原則2）
+        if (results.every((r) => r.status === 'rejected')) return
         const balances = new Map<string, TokenBalance>()
         for (const r of results) {
           if (r.status !== 'fulfilled') continue

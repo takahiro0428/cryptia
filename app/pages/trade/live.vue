@@ -484,7 +484,12 @@ useHead({ title: '実トレード | Cryptia' })
             </tr>
             <tr v-else>
               <td class="dim">受け取り</td>
-              <td class="mono">{{ quoteSolAmount.toFixed(6) }} SOL（≈ {{ fmtUsd(approxUsd) }}）</td>
+              <!-- 受取価値は実際の quote 由来を表示（max() 後のガード計上額と混同しない: ISSUE-P8-12） -->
+              <td class="mono">{{ quoteSolAmount.toFixed(6) }} SOL（≈ {{ fmtUsd(quoteSolAmount * solPriceUsd) }}）</td>
+            </tr>
+            <tr v-if="direction === 'sell' && approxUsd > quoteSolAmount * solPriceUsd * 1.05">
+              <td class="dim">上限への計上額</td>
+              <td class="mono">{{ fmtUsd(approxUsd) }} <span class="xs faint">（トークン参照価値・保守値）</span></td>
             </tr>
             <tr><td class="dim">価格影響</td><td class="mono" :class="Number(quote.priceImpactPct) > 1 ? 'down' : ''">{{ Number(quote.priceImpactPct).toFixed(3) }}%</td></tr>
             <tr><td class="dim">スリッページ許容</td><td class="mono">1.0%</td></tr>

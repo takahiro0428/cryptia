@@ -11,6 +11,14 @@ const ui = useUiStore()
 const editing = ref<StrategyDoc | null>(null)
 const form = reactive({ name: '', content: '', riskLevel: 3 })
 const showForm = ref(false)
+const formRef = ref<HTMLElement | null>(null)
+
+// 下部の戦略カードから編集を開始した場合もフォームが視界に入るよう追従スクロール
+watch(showForm, async (visible) => {
+  if (!visible) return
+  await nextTick()
+  formRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+})
 
 function startCreate() {
   editing.value = null
@@ -57,6 +65,8 @@ function save() {
 }
 
 function remove(doc: StrategyDoc) {
+  // 削除は取り消せないため確認を挟む（誤タップ防止）
+  if (!window.confirm(`戦略「${doc.name}」を削除しますか？この操作は取り消せません。`)) return
   strategy.removeCustom(doc.id)
   ui.notify(`戦略「${doc.name}」を削除しました`)
 }
@@ -81,7 +91,7 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
     </p>
 
     <!-- 戦略編集フォーム -->
-    <section v-if="showForm" class="card" style="border-color: var(--accent)">
+    <section v-if="showForm" ref="formRef" class="card" style="border-color: var(--accent)">
       <h2>{{ editing ? '戦略を編集' : '新しい戦略' }}</h2>
       <label class="field">
         <span>戦略名</span>

@@ -34,19 +34,24 @@ interface GeminiInsight {
 }
 
 /**
- * Gemini 応答のエントリーレンジ検証。min<max・現値±50% 以内でない場合は
- * テクニカル算出のフォールバック値を返す（架空水準の提示を防ぐ）。
+ * Gemini 応答のエントリーレンジ検証。min<max・現値±50% 以内に加え、
+ * 方向整合（ロング=現値未満 / ショート=現値超: ISSUE-P8-13）を検証し、
+ * 満たさない場合はテクニカル算出のフォールバック値を返す（架空水準の提示を防ぐ）。
  */
 function sanitizeRange(
   raw: GeminiRange | undefined,
   fallback: EntryRange,
   ticker: Ticker,
+  side: 'long' | 'short',
 ): EntryRange {
   const min = Number(raw?.min)
   const max = Number(raw?.max)
   const price = ticker.priceUsd
   const within = (v: number) => Number.isFinite(v) && v > price * 0.5 && v < price * 1.5
   if (!within(min) || !within(max) || min >= max) return fallback
+  // 押し目買いゾーンが現値より上/戻り売りゾーンが現値より下は方向矛盾
+  if (side === 'long' && max >= price) return fallback
+  if (side === 'short' && min <= price) return fallback
   return { minUsd: min, maxUsd: max, note: String(raw?.note ?? '').slice(0, 120) || fallback.note }
 }
 
@@ -149,8 +154,8 @@ export default defineEventHandler(async (event): Promise<Insight> => {
       reasons: (parsed.reasons ?? []).map((r) => String(r).slice(0, 300)).slice(0, 5),
       risks: (parsed.risks ?? []).map((r) => String(r).slice(0, 300)).slice(0, 4),
       entryRanges: {
-        long: sanitizeRange(parsed.entryLong, fallbackRanges.long, ticker),
-        short: sanitizeRange(parsed.entryShort, fallbackRanges.short, ticker),
+        long: sanitizeRange(parsed.entryLong, fallbackRanges.long, ticker, 'long'),
+        short: sanitizeRange(parsed.entryShort, fallbackRanges.short, ticker, 'short'),
       },
       sources,
       engine: 'vertex-ai',

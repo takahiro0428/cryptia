@@ -21,9 +21,11 @@ export const useUiStore = defineStore('ui', {
     notify(message: string, kind: Toast['kind'] = 'info', code?: string) {
       const id = ++toastSeq
       this.toasts.push({ id, message, kind, code })
-      setTimeout(() => {
-        this.toasts = this.toasts.filter((t) => t.id !== id)
-      }, 5000)
+      setTimeout(() => this.dismiss(id), 5000)
+    },
+    /** トーストの即時クローズ（タップで消せる: 操作性） */
+    dismiss(id: number) {
+      this.toasts = this.toasts.filter((t) => t.id !== id)
     },
     /** 想定エラーをコード付きで通知し、コンソールにも構造化ログを残す */
     notifyError(err: unknown, fallbackMessage: string) {

@@ -30,6 +30,19 @@ function applyRecommendation() {
   showRecommend.value = true
 }
 
+/** 開始後はダッシュボード（ページ上部に描画）へ視点を移動する */
+function startSession() {
+  demo.start(initialUsd.value, selectedIds.value, engineMode.value)
+  if (demo.portfolio) window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+/** セッション終了の誤タップ防止（実行中の自動売買が止まりアーカイブへ移るため確認を挟む） */
+function confirmEndSession() {
+  if (window.confirm('セッションを終了しますか？\n実行中の自動売買が停止し、結果はアーカイブに保存されます。')) {
+    demo.endSession()
+  }
+}
+
 const equityValues = computed(() => demo.portfolio?.equityCurve.map((p) => p.equityUsd) ?? [])
 const positionRows = computed(() => {
   const prices = market.priceMap
@@ -110,7 +123,7 @@ useHead({ title: 'デモトレード | Cryptia' })
         type="button"
         style="width: 100%"
         :disabled="selectedIds.length === 0 || initialUsd < 100"
-        @click="demo.start(initialUsd, selectedIds, engineMode)"
+        @click="startSession"
       >
         <Play :size="15" aria-hidden="true" /> デモトレードを開始
       </button>
@@ -155,7 +168,7 @@ useHead({ title: 'デモトレード | Cryptia' })
           <button v-else class="btn btn-success" type="button" @click="demo.startTicking()">
             <Play :size="15" aria-hidden="true" /> 再開
           </button>
-          <button class="btn btn-danger" type="button" @click="demo.endSession()">
+          <button class="btn btn-danger" type="button" @click="confirmEndSession">
             <Square :size="14" aria-hidden="true" /> セッション終了
           </button>
         </div>

@@ -20,6 +20,9 @@ onMounted(async () => {
   if (ctx) {
     available.value = true
     info.value = ctx.accountInfo()
+    // リダイレクト連携から復帰した際のエラーを通知（ISSUE-P8-14）
+    const linkError = ctx.consumeLinkError()
+    if (linkError) ui.notify(linkError, 'error', 'CRYPTIA-E602')
   }
 })
 

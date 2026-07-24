@@ -25,6 +25,16 @@ interface FirebaseContext {
   linkWithGoogle(): Promise<AccountInfo>
   /** 現在のアカウント状態 */
   accountInfo(): AccountInfo
+  /** リダイレクト連携から復帰した際のエラーメッセージを1回だけ取り出す（ISSUE-P8-14） */
+  consumeLinkError(): string | null
+}
+
+/** アカウントリンクのエラーコード → ユーザー向けメッセージ（ポップアップ/リダイレクト共通） */
+function linkErrorMessage(code: string | undefined): string {
+  if (code === 'auth/credential-already-in-use') {
+    return 'この Google アカウントは既に別のデータに連携されています。別のアカウントをお試しください'
+  }
+  return 'アカウント連携がキャンセルまたは失敗しました'
 }
 
 let initPromise: Promise<FirebaseContext | null> | null = null
@@ -60,12 +70,14 @@ export function useFirebase(): Promise<FirebaseContext | null> {
           reject(e)
         })
       })
-      // リダイレクト方式のアカウント連携から復帰した場合の完了処理（ISSUE-P8-11）
+      // リダイレクト方式のアカウント連携から復帰した場合の完了処理（ISSUE-P8-11）。
+      // エラーは保持して AccountLink がユーザーへ通知する（黙殺しない: ISSUE-P8-14）
+      let pendingLinkError: string | null = null
       try {
         const { getRedirectResult } = await import('firebase/auth')
         await getRedirectResult(auth)
-      } catch {
-        /* 復帰結果のエラー（連携済み等）は AccountLink 側の状態表示に委ねる */
+      } catch (err) {
+        pendingLinkError = linkErrorMessage((err as { code?: string }).code)
       }
 
       // 共有プロジェクト同居のため専用の名前付きデータベースを使用する
@@ -96,12 +108,6 @@ export function useFirebase(): Promise<FirebaseContext | null> {
             return { isAnonymous: result.user.isAnonymous, email: result.user.email }
           } catch (err) {
             const code = (err as { code?: string }).code
-            if (code === 'auth/credential-already-in-use') {
-              throw new CryptiaError(
-                ERROR_CODES.ACCOUNT_LINK_FAILED,
-                'この Google アカウントは既に別のデータに連携されています。別のアカウントをお試しください',
-              )
-            }
             // WebView（Phantom アプリ内ブラウザ等）ではポップアップが開けないため
             // リダイレクト方式へフォールバックする（ISSUE-P8-11）。
             // ページ遷移するため戻り値は到達しない（復帰時に getRedirectResult で完了する）
@@ -113,15 +119,17 @@ export function useFirebase(): Promise<FirebaseContext | null> {
               await linkWithRedirect(user, provider)
               return { isAnonymous: true, email: null }
             }
-            throw new CryptiaError(
-              ERROR_CODES.ACCOUNT_LINK_FAILED,
-              'アカウント連携がキャンセルまたは失敗しました',
-            )
+            throw new CryptiaError(ERROR_CODES.ACCOUNT_LINK_FAILED, linkErrorMessage(code))
           }
         },
         accountInfo() {
           const user = auth.currentUser
           return { isAnonymous: user?.isAnonymous ?? true, email: user?.email ?? null }
+        },
+        consumeLinkError() {
+          const message = pendingLinkError
+          pendingLinkError = null
+          return message
         },
       }
     } catch (err) {

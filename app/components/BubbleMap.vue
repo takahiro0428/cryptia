@@ -242,22 +242,40 @@ function resize() {
 }
 
 // --- ドラッグ / タッチ操作 ---
-// ドラッグでバブルを引っ張って投げられる。移動が小さい場合はタップ = 選択として扱う。
+// 操作ポリシー（モバイル操作性の設計）:
+//   - バブル上で開始: ドラッグで移動・小移動ならタップ = 選択
+//   - 空白で開始: 何もしない（touch-action: pan-y によりページスクロールに委ねる）
+//   - 選択解除はバブル外の操作では行わない（スクロール中の誤クローズ防止。
+//     閉じるのは内訳パネルの閉じるボタンのみ）
 let dragId: string | null = null
 let dragMoved = 0
 let lastPointer = { x: 0, y: 0 }
 
-function canvasPos(e: PointerEvent): { x: number; y: number } {
+function canvasPos(clientX: number, clientY: number): { x: number; y: number } {
   const rect = canvasRef.value!.getBoundingClientRect()
-  return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  return { x: clientX - rect.left, y: clientY - rect.top }
+}
+
+function hitNode(x: number, y: number) {
+  return nodes.find((n) => Math.hypot(n.x - x, n.y - y) <= n.r + 6)
+}
+
+/**
+ * タッチ開始がバブル上のときのみスクロールを抑止する（passive: false で登録）。
+ * 空白から始まるスワイプはブラウザのページスクロール（pan-y）として自然に流す。
+ */
+function onTouchStart(e: TouchEvent) {
+  if (!canvasRef.value || e.touches.length === 0) return
+  const { x, y } = canvasPos(e.touches[0].clientX, e.touches[0].clientY)
+  if (hitNode(x, y)) e.preventDefault()
 }
 
 function onPointerDown(e: PointerEvent) {
   if (!canvasRef.value) return
-  const { x, y } = canvasPos(e)
+  const { x, y } = canvasPos(e.clientX, e.clientY)
   lastPointer = { x, y }
   dragMoved = 0
-  const hit = nodes.find((n) => Math.hypot(n.x - x, n.y - y) <= n.r + 6)
+  const hit = hitNode(x, y)
   if (hit) {
     dragId = hit.id
     canvasRef.value.setPointerCapture(e.pointerId)
@@ -266,7 +284,7 @@ function onPointerDown(e: PointerEvent) {
 
 function onPointerMove(e: PointerEvent) {
   if (!dragId || !canvasRef.value) return
-  const { x, y } = canvasPos(e)
+  const { x, y } = canvasPos(e.clientX, e.clientY)
   dragMoved += Math.hypot(x - lastPointer.x, y - lastPointer.y)
   const n = nodes.find((v) => v.id === dragId)
   if (n) {
@@ -280,16 +298,9 @@ function onPointerMove(e: PointerEvent) {
   e.preventDefault()
 }
 
-function onPointerUp(e: PointerEvent) {
-  const wasDragging = dragId
-  const { x, y } = canvasPos(e)
-  if (wasDragging) {
-    // 移動量が小さければタップ = 選択
-    if (dragMoved < 8) emit('select', wasDragging)
-  } else {
-    const hit = nodes.find((n) => Math.hypot(n.x - x, n.y - y) <= n.r + 6)
-    emit('select', hit ? hit.id : null)
-  }
+function onPointerUp() {
+  // バブル上の小移動のみ選択として扱う。空白タップ・スワイプでは選択を変更しない
+  if (dragId && dragMoved < 8) emit('select', dragId)
   dragId = null
 }
 
@@ -298,11 +309,14 @@ onMounted(() => {
   resize()
   resizeObserver = new ResizeObserver(resize)
   if (wrapRef.value) resizeObserver.observe(wrapRef.value)
+  // touchstart は preventDefault のため passive: false で登録する
+  canvasRef.value?.addEventListener('touchstart', onTouchStart, { passive: false })
   raf = requestAnimationFrame(render)
 })
 onBeforeUnmount(() => {
   cancelAnimationFrame(raf)
   resizeObserver?.disconnect()
+  canvasRef.value?.removeEventListener('touchstart', onTouchStart)
 })
 watch(
   () => props.tickers,
@@ -334,8 +348,9 @@ watch(
 }
 canvas {
   display: block;
-  /* ドラッグ操作を優先（マップ上ではスクロールより操作性を優先する） */
-  touch-action: none;
+  /* 空白からの縦スワイプはページスクロールに委ね、バブル上の操作のみ
+     touchstart の preventDefault でドラッグに割り当てる */
+  touch-action: pan-y;
   cursor: grab;
 }
 canvas:active { cursor: grabbing; }
