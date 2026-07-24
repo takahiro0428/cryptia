@@ -18,7 +18,7 @@
 | CRYPTIA-E502 | 実トレード: 上限超過 | 1回/1日上限を超える注文 | 注文ブロック | 正常動作（安全ガード）。上限は戦略画面でなくガード設定で変更 |
 | CRYPTIA-E503 | ウォレット未接続 | Phantom 未検出・接続拒否 | 実トレード不可 | Phantom 導入 / アプリ内ブラウザ利用を案内 |
 | CRYPTIA-E504 | スワップ見積り失敗 | Jupiter 障害・流動性不足・不正ミント | 注文中断 | トークン・数量を変えて再試行。Jupiter ステータス確認 |
-| CRYPTIA-E601 | Firestore 同期失敗 | ルール拒否・オフライン・未設定 | ローカル保存で継続（データ損失なし） | Firebase 設定（NUXT_PUBLIC_FIREBASE_*）と Rules デプロイを確認 |
+| CRYPTIA-E601 | Firestore 同期失敗 | ルール拒否・オフライン・未設定 | ローカル保存で継続（データ損失なし） | Firebase 設定（NUXT_PUBLIC_FIREBASE_*）、専用 DB `cryptia` の作成有無、Rules デプロイを確認 |
 | CRYPTIA-E999 | 未分類エラー | 想定外の例外 | 操作による | Cloud Logging / ブラウザコンソールのスタックトレースを確認し、エラーコードの新設を検討 |
 
 ## ログの見方

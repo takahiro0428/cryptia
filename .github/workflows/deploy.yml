@@ -177,10 +177,15 @@ jobs:
           NUXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ vars.NUXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
           NUXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ vars.NUXT_PUBLIC_FIREBASE_PROJECT_ID }}
           NUXT_PUBLIC_FIREBASE_APP_ID: ${{ vars.NUXT_PUBLIC_FIREBASE_APP_ID }}
+          NUXT_PUBLIC_FIREBASE_DATABASE_ID: ${{ vars.NUXT_PUBLIC_FIREBASE_DATABASE_ID }}
           NUXT_VERTEX_LOCATION: ${{ vars.NUXT_VERTEX_LOCATION }}
           NUXT_VERTEX_MODEL: ${{ vars.NUXT_VERTEX_MODEL }}
           # AI API レートリミットの信頼プロキシホップ数（deploy-firebase.sh が Functions の .env へ書き出す）
           NUXT_TRUSTED_PROXY_HOPS: ${{ vars.NUXT_TRUSTED_PROXY_HOPS }}
+          # 共有プロジェクト同居用: Hosting サイト名（未設定時は既定サイト）と
+          # firestore.rules デプロイの有効化（専用プロジェクトのみ 'true'）
+          FIREBASE_HOSTING_SITE: ${{ vars.FIREBASE_HOSTING_SITE }}
+          DEPLOY_FIRESTORE_RULES: ${{ vars.DEPLOY_FIRESTORE_RULES }}
         run: bash scripts/run-test-stage.sh "デプロイ" deploy
 
       - name: デプロイログをアーティファクトとして保存

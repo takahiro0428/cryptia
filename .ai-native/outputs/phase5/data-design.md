@@ -6,10 +6,10 @@
 |--------|-----|----------------|---------|
 | 市場価格・ティッカー | CoinGecko（外部） | stores/market（メモリ）+ SW キャッシュ | 外部→クライアント（読み取り専用） |
 | Solana ペア情報 | DexScreener（外部） | stores/solana（メモリ）+ SW キャッシュ | 外部→クライアント（読み取り専用） |
-| デモトレード状態（ポートフォリオ・注文・アーカイブ） | クライアント操作結果（localStorage） | Firestore `users/{uid}/state/demo-trade` | ローカル先行 → Firestore 後追い |
-| Solana セッション状態 | 同上（localStorage） | Firestore `users/{uid}/state/solana-degen` | 同上 |
-| 戦略ドキュメント | 同上（localStorage） | Firestore `users/{uid}/state/strategies` | 同上 |
-| 取引ガード設定・実トレードログ | 同上（localStorage） | Firestore `users/{uid}/state/trade-guard` / `live-trade-log` | 同上 |
+| デモトレード状態（ポートフォリオ・注文・アーカイブ） | クライアント操作結果（localStorage） | Firestore `cryptia-users/{uid}/state/demo-trade` | ローカル先行 → Firestore 後追い |
+| Solana セッション状態 | 同上（localStorage） | Firestore `cryptia-users/{uid}/state/solana-degen` | 同上 |
+| 戦略ドキュメント | 同上（localStorage） | Firestore `cryptia-users/{uid}/state/strategies` | 同上 |
+| 取引ガード設定・実トレードログ | 同上（localStorage） | Firestore `cryptia-users/{uid}/state/trade-guard` / `live-trade-log` | 同上 |
 | 実トレードの真の約定記録 | **Solana チェーン**（オンチェーン） | アプリ内ログは参考記録（Solscan リンクで原本参照） | チェーン→参照のみ |
 
 - 復元時は `savedAt` の新しい方を採用（複数端末同期）。SoT から復元できないデータ:
@@ -51,12 +51,15 @@ erDiagram
 ## Firestore スキーマ
 
 ```
-users/{uid}/state/{stateKey}
+cryptia-users/{uid}/state/{stateKey}
   ├── savedAt: number   # クライアント保存時刻（競合解決キー）
-  └── json: string      # 状態の JSON シリアライズ（< 900KB, Rules で検証）
+  └── json: string      # 状態の JSON シリアライズ（< 256KB, Rules で検証）
 ```
 
-- stateKey: `demo-trade` / `solana-degen` / `strategies` / `trade-guard` / `live-trade-log`
+- **専用の名前付きデータベース `cryptia`** を使用（共有プロジェクトで他アプリとルール・データを完全分離。
+  DB ID は `NUXT_PUBLIC_FIREBASE_DATABASE_ID` で変更可）
+- コレクション名の `cryptia-` prefix は、誤って既定 DB を参照した場合の衝突回避としての多層防御
+- stateKey: `demo-trade` / `solana-degen` / `strategies` / `trade-guard` / `live-trade-log`（Rules でホワイトリスト検証）
 - Security Rules: `request.auth.uid == uid` の行レベル制御 + フィールド型・サイズ検証。他パスは全拒否
 - 記録系（注文・ログ）は JSON 内で追記のみ。再実行・再訪で巻き戻らない（原則2 / BR-7）
 

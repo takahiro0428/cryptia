@@ -24,6 +24,10 @@ export default defineNuxtConfig({
     preset: process.env.NITRO_PRESET,
     firebase: {
       gen: 2,
+      // 共有 Firebase プロジェクトでの同居前提のため、既定の 'server' から
+      // アプリ名 prefix 付きへ変更（他アプリの関数名との衝突回避）。
+      // firebase.json の hosting rewrite（functionId）と一致させること
+      serverFunctionName: 'cryptiaserver',
       httpsOptions: { region: 'asia-northeast1', maxInstances: 3 },
       nodeVersion: '20',
     },
@@ -40,6 +44,9 @@ export default defineNuxtConfig({
       firebaseAuthDomain: '',
       firebaseProjectId: '',
       firebaseAppId: '',
+      // Firestore の名前付きデータベース ID。共有プロジェクトでの他アプリとの
+      // 同居のため専用 DB（既定: cryptia）を使用する。'(default)' で既定 DB に戻せる
+      firebaseDatabaseId: 'cryptia',
     },
   },
   pwa: {
@@ -66,10 +73,11 @@ export default defineNuxtConfig({
       runtimeCaching: [
         {
           // 価格系 API は「ネット優先・失敗時キャッシュ」。オフラインでも最終値を表示する（BR-5）
+          // キャッシュ名は他アプリとの同居を考慮しアプリ名 prefix を付与
           urlPattern: /^https:\/\/api\.coingecko\.com\/.*/,
           handler: 'NetworkFirst',
           options: {
-            cacheName: 'market-data',
+            cacheName: 'cryptia-market-data',
             networkTimeoutSeconds: 8,
             expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 },
           },
@@ -78,7 +86,7 @@ export default defineNuxtConfig({
           urlPattern: /^https:\/\/api\.dexscreener\.com\/.*/,
           handler: 'NetworkFirst',
           options: {
-            cacheName: 'dex-data',
+            cacheName: 'cryptia-dex-data',
             networkTimeoutSeconds: 8,
             expiration: { maxEntries: 32, maxAgeSeconds: 60 * 30 },
           },

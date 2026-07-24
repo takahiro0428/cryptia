@@ -41,7 +41,8 @@ async function saveRemote<T>(key: string, payload: Persisted<T>): Promise<void> 
   if (!ctx) return
   try {
     const { doc, setDoc } = await import('firebase/firestore')
-    await setDoc(doc(ctx.db, 'users', ctx.uid, 'state', key), {
+    // コレクション名は共有プロジェクトでの他アプリとの衝突回避のため cryptia- prefix
+    await setDoc(doc(ctx.db, 'cryptia-users', ctx.uid, 'state', key), {
       savedAt: payload.savedAt,
       json: JSON.stringify(payload.data),
     })
@@ -55,7 +56,7 @@ async function loadRemote<T>(key: string): Promise<Persisted<T> | null> {
   if (!ctx) return null
   try {
     const { doc, getDoc } = await import('firebase/firestore')
-    const snap = await getDoc(doc(ctx.db, 'users', ctx.uid, 'state', key))
+    const snap = await getDoc(doc(ctx.db, 'cryptia-users', ctx.uid, 'state', key))
     if (!snap.exists()) return null
     const raw = snap.data() as { savedAt?: number; json?: string }
     if (typeof raw.savedAt !== 'number' || typeof raw.json !== 'string') return null

@@ -1,15 +1,26 @@
 rules_version = '2';
 
 // Cryptia Firestore Security Rules
-// SoT: クライアント操作結果（ローカル）→ users/{uid}/state はその同期キャッシュ。
+// SoT: クライアント操作結果（ローカル）→ cryptia-users/{uid}/state はその同期キャッシュ。
 // 匿名認証の uid 単位で自分のデータのみ読み書き可能（Phase 3: ユーザー権限）。
+//
+// 【デプロイ先 — 専用の名前付きデータベース "cryptia"】
+// Security Rules はデータベース単位のため、専用 DB を使うことで共有プロジェクトでも
+// 他アプリのルール・データと完全に分離される（firebase.json の firestore.database 参照）。
+// 初回のみデータベースを作成すること:
+//   npx firebase-tools@14.27.0 firestore:databases:create cryptia \
+//     --location asia-northeast1 --project <プロジェクトID>
+// 作成後は repository variable DEPLOY_FIRESTORE_RULES=true でパイプラインから
+// 安全にデプロイできる（cryptia DB のルールのみが更新される）。
+// コレクション名の cryptia- prefix は、誤って既定 DB を参照した場合の
+// 衝突回避としての多層防御（deploy-guide.md §3 Cryptia セクション参照）。
 //
 // 注意（CLAUDE.md Firestore 確認ポイント）:
 // - read（get/list）では request.resource が存在しないため、read と write の
 //   条件は必ず分離する（混在させるとルール評価エラー = 全 read 拒否になる）
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{uid}/state/{stateKey} {
+    match /cryptia-users/{uid}/state/{stateKey} {
       // 読み取り・削除: 本人のみ
       allow read, delete: if request.auth != null && request.auth.uid == uid;
 
@@ -25,7 +36,7 @@ service cloud.firestore {
         && request.resource.data.json.size() < 262144;
     }
 
-    // 上記以外へのアクセスはすべて拒否
+    // 上記以外へのアクセスはすべて拒否（cryptia データベース内で完結）
     match /{document=**} {
       allow read, write: if false;
     }

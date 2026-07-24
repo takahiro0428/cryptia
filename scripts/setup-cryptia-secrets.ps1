@@ -57,6 +57,23 @@
     デプロイ後に Cloud Logging で実際の X-Forwarded-For を確認し、
     実クライアント IP の位置に合わせて調整する（deploy-guide.md §3 参照）。
 
+.PARAMETER HostingSite
+    デプロイ先の Firebase Hosting サイト名（任意）。共有プロジェクトで他アプリと
+    同居する場合は専用サイト（例: cryptia-app）を事前に作成して指定する:
+      firebase hosting:sites:create cryptia-app --project <ProjectId>
+    未指定時はプロジェクト既定サイト（= プロジェクト ID）へデプロイされる。
+
+.PARAMETER DeployFirestoreRules
+    'true' を指定すると firestore.rules もパイプラインでデプロイする（既定: 未登録 = 無効）。
+    ルールは専用データベース "cryptia" のみに適用されるため共有プロジェクトでも安全。
+    事前にデータベースを作成しておくこと:
+      npx firebase-tools@14.27.0 firestore:databases:create cryptia --location asia-northeast1 --project <ProjectId>
+
+.PARAMETER FirestoreDatabaseId
+    アプリが使用する Firestore の名前付きデータベース ID（既定: cryptia）。
+    既定データベースを使う場合のみ '(default)' を指定する（firebase.json の
+    firestore.database も合わせて変更すること）。
+
 .EXAMPLE
     .\scripts\setup-cryptia-secrets.ps1 -ProjectId "my-cryptia-prod" -ServiceAccountJsonPath "C:\keys\sa.json"
 
@@ -75,7 +92,10 @@ param(
     [string]$FirebaseAppId = "",
     [string]$VertexLocation = "asia-northeast1",
     [string]$VertexModel = "gemini-2.0-flash",
-    [string]$TrustedProxyHops = "1"
+    [string]$TrustedProxyHops = "1",
+    [string]$HostingSite = "",
+    [string]$DeployFirestoreRules = "",
+    [string]$FirestoreDatabaseId = "cryptia"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -178,6 +198,18 @@ Write-Host "[repository variables: アプリ設定（公開可能な識別子）
 Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_VERTEX_LOCATION' -Value $VertexLocation
 Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_VERTEX_MODEL' -Value $VertexModel
 Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_TRUSTED_PROXY_HOPS' -Value $TrustedProxyHops
+if ($HostingSite -ne "") {
+    Set-RepoVariable -TargetRepo $TargetRepo -Name 'FIREBASE_HOSTING_SITE' -Value $HostingSite
+} else {
+    Write-Host "  [SKIP] FIREBASE_HOSTING_SITE は未指定（プロジェクト既定サイトへデプロイされます）"
+}
+Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_PUBLIC_FIREBASE_DATABASE_ID' -Value $FirestoreDatabaseId
+if ($DeployFirestoreRules -eq "true") {
+    Set-RepoVariable -TargetRepo $TargetRepo -Name 'DEPLOY_FIRESTORE_RULES' -Value 'true'
+    Write-Host "  [NOTE] DEPLOY_FIRESTORE_RULES=true: ルールは専用 DB '$FirestoreDatabaseId' のみに適用されます（事前に DB を作成してください）"
+} else {
+    Write-Host "  [SKIP] DEPLOY_FIRESTORE_RULES は未登録（初回は DB 作成後に -DeployFirestoreRules 'true' で再実行、または手動デプロイ）"
+}
 if ($FirebaseApiKey -ne "") {
     Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_PUBLIC_FIREBASE_API_KEY' -Value $FirebaseApiKey
     Set-RepoVariable -TargetRepo $TargetRepo -Name 'NUXT_PUBLIC_FIREBASE_PROJECT_ID' -Value $ProjectId

@@ -47,7 +47,12 @@ export function useFirebase(): Promise<FirebaseContext | null> {
           reject(e)
         })
       })
-      return { app, db: getFirestore(app), uid }
+      // 共有プロジェクト同居のため専用の名前付きデータベースを使用する
+      // （Security Rules がデータベース単位になり、他アプリのルールと完全分離される）
+      const databaseId = config.firebaseDatabaseId || 'cryptia'
+      const db =
+        databaseId === '(default)' ? getFirestore(app) : getFirestore(app, databaseId)
+      return { app, db, uid }
     } catch (err) {
       console.warn(`Firebase 初期化に失敗（ローカルモードで継続）: ${err instanceof Error ? err.message : err}`)
       return null

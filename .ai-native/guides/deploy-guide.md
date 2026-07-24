@@ -121,8 +121,37 @@ Cryptia アプリ（`app/` 配下、Firebase + GCP + Vertex AI 構成）では�
 > 左端（偽装可能領域）へずれ、右端が共有プロキシ IP のままだと全ユーザーが単一の
 > レートリミットバケットを共有して AI 機能が 429 で劣化する（フォールバック分析へ自動降格）。
 | variable | `NUXT_PUBLIC_FIREBASE_API_KEY` ほか `NUXT_PUBLIC_FIREBASE_*` | Firebase Web 設定（公開可能な識別子） |
+| variable | `NUXT_PUBLIC_FIREBASE_DATABASE_ID` | Firestore の名前付きデータベース ID（既定 `cryptia`。共有プロジェクト同居のための専用 DB） |
+| variable | `FIREBASE_HOSTING_SITE` | 任意。デプロイ先 Hosting サイト名（共有プロジェクトでは専用サイトを指定。未設定時は既定サイト） |
+| variable | `DEPLOY_FIRESTORE_RULES` | 任意。`true` で firestore.rules をパイプラインからデプロイ（専用 DB のみに適用されるため共有プロジェクトでも安全。要: DB 作成済み） |
 | secret | `DEPLOY_TOKEN` | Firebase/GCP **サービスアカウント JSON キーの全文** |
 | secret | `DEPLOY_TARGET` | Firebase プロジェクト ID |
+
+#### 共有プロジェクトでの同居（他アプリと同一の Firebase/GCP プロジェクトを使う場合）
+
+Cryptia は名前衝突を避けるため、リソース名にアプリ名 prefix を付与している:
+
+| リソース | 名称 | 分離の仕組み |
+|---------|------|-------------|
+| Cloud Functions | 関数名 `cryptiaserver` / codebase `cryptia` | codebase 限定デプロイのため他アプリの関数に触れない（削除もしない） |
+| Hosting | target `cryptia` → `FIREBASE_HOSTING_SITE` のサイトへ | サイト単位で分離 |
+| Firestore | **専用の名前付きデータベース `cryptia`** + コレクション `cryptia-users` | ルール・データともデータベース単位で完全分離 |
+| Service Worker キャッシュ / localStorage | `cryptia-` / `cryptia:` prefix | オリジン内でも衝突しない |
+
+初回のみ、以下を作成する（PowerShell 5.1 / コマンドベースで完結）:
+
+```powershell
+# 1. Hosting 専用サイト（例: cryptia-app。URL は https://cryptia-app.web.app）
+npx firebase-tools@14.27.0 hosting:sites:create cryptia-app --project <プロジェクトID>
+
+# 2. Firestore 専用データベース
+npx firebase-tools@14.27.0 firestore:databases:create cryptia --location asia-northeast1 --project <プロジェクトID>
+
+# 3. 設定値の登録（サイト名とルールデプロイ有効化を含める）
+.\scripts\setup-cryptia-secrets.ps1 -ProjectId "<プロジェクトID>" `
+    -ServiceAccountJsonPath "C:\keys\sa.json" `
+    -HostingSite "cryptia-app" -DeployFirestoreRules "true"
+```
 
 > サービスアカウントには `roles/firebase.admin`・`roles/cloudfunctions.developer`・
 > `roles/iam.serviceAccountUser` 相当の権限、および Vertex AI 利用時は
