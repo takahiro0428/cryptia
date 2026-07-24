@@ -1,8 +1,8 @@
 import { defineEventHandler, readBody } from 'h3'
 import { ASSET_MAP } from '~/shared/assets'
-import { fallbackInsight } from '~/shared/advisor'
+import { computeEntryRanges, fallbackInsight } from '~/shared/advisor'
 import { clamp } from '~/shared/ta'
-import type { Insight, Stance } from '~/shared/types'
+import type { EntryRange, Insight, Stance, Ticker } from '~/shared/types'
 import { filterNewsForAsset, getMarketNews } from '../../utils/news'
 import { untrustedBlock } from '../../utils/prompt'
 import { retrieveRelevantStrategies } from '../../utils/rag'
@@ -17,12 +17,37 @@ import {
 const HORIZON_LABELS = { short: '短期（〜1週間）', mid: '中期（〜1ヶ月）', long: '長期（〜1年）' }
 const STANCES: Stance[] = ['bullish', 'neutral', 'bearish']
 
+interface GeminiRange {
+  min?: number
+  max?: number
+  note?: string
+}
+
 interface GeminiInsight {
   stance?: string
   confidence?: number
   summary?: string
   reasons?: string[]
   risks?: string[]
+  entryLong?: GeminiRange
+  entryShort?: GeminiRange
+}
+
+/**
+ * Gemini 応答のエントリーレンジ検証。min<max・現値±50% 以内でない場合は
+ * テクニカル算出のフォールバック値を返す（架空水準の提示を防ぐ）。
+ */
+function sanitizeRange(
+  raw: GeminiRange | undefined,
+  fallback: EntryRange,
+  ticker: Ticker,
+): EntryRange {
+  const min = Number(raw?.min)
+  const max = Number(raw?.max)
+  const price = ticker.priceUsd
+  const within = (v: number) => Number.isFinite(v) && v > price * 0.5 && v < price * 1.5
+  if (!within(min) || !within(max) || min >= max) return fallback
+  return { minUsd: min, maxUsd: max, note: String(raw?.note ?? '').slice(0, 120) || fallback.note }
 }
 
 /**
@@ -89,8 +114,11 @@ export default defineEventHandler(async (event): Promise<Insight> => {
         ]
       : []),
     '## 出力形式',
-    '次の JSON のみを出力（コードフェンス不要・日本語）:',
-    '{"stance":"bullish|neutral|bearish","confidence":0-100の数値,"summary":"1〜2文の要約","reasons":["根拠を2〜4個"],"risks":["リスクを1〜3個"]}',
+    '次の JSON のみを出力（コードフェンス不要・日本語）。',
+    'entryLong はロングの押し目買いゾーン、entryShort はショートの戻り売りゾーン。',
+    'いずれも現在価格を基準に、サポート/レジスタンス・ボラティリティを考慮した現実的な USD 水準にすること:',
+    '{"stance":"bullish|neutral|bearish","confidence":0-100の数値,"summary":"1〜2文の要約","reasons":["根拠を2〜4個"],"risks":["リスクを1〜3個"],' +
+      '"entryLong":{"min":数値,"max":数値,"note":"ゾーンの根拠を短く"},"entryShort":{"min":数値,"max":数値,"note":"ゾーンの根拠を短く"}}',
   ].join('\n')
 
   const text = await generateWithVertex(prompt)
@@ -110,6 +138,8 @@ export default defineEventHandler(async (event): Promise<Insight> => {
         `RAG 検索（${rag.method === 'vector' ? 'ベクトル' : 'キーワード'}）: ${rag.docs.map((d) => d.name).join(' / ')}`,
       )
     }
+    // エントリーレンジは Gemini 提案を検証し、不正時はテクニカル算出へフォールバック
+    const fallbackRanges = computeEntryRanges(ticker)
     return {
       assetId: ticker.assetId,
       horizon,
@@ -118,6 +148,10 @@ export default defineEventHandler(async (event): Promise<Insight> => {
       summary: String(parsed.summary).slice(0, 500),
       reasons: (parsed.reasons ?? []).map((r) => String(r).slice(0, 300)).slice(0, 5),
       risks: (parsed.risks ?? []).map((r) => String(r).slice(0, 300)).slice(0, 4),
+      entryRanges: {
+        long: sanitizeRange(parsed.entryLong, fallbackRanges.long, ticker),
+        short: sanitizeRange(parsed.entryShort, fallbackRanges.short, ticker),
+      },
       sources,
       engine: 'vertex-ai',
       generatedAt: Date.now(),

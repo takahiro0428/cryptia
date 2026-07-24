@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decideTrade, fallbackInsight } from '~/shared/advisor'
+import { computeEntryRanges, decideTrade, fallbackInsight } from '~/shared/advisor'
 import { decideDegenTrade } from '~/shared/degenAdvisor'
 import { mockSolanaTokens, mockTickers } from '~/shared/mockData'
 import { STRATEGY_PRESETS } from '~/shared/strategyPresets'
@@ -26,6 +26,24 @@ describe('アドバイザー × トレードエンジン結合', () => {
         expect(ins.engine).toBe('fallback')
       }
     }
+  })
+
+  it('computeEntryRanges: ロングは現値未満・ショートは現値超、いずれも min < max', () => {
+    for (const t of tickers) {
+      const ranges = computeEntryRanges(t)
+      expect(ranges.long.minUsd).toBeLessThan(ranges.long.maxUsd)
+      expect(ranges.long.maxUsd).toBeLessThan(t.priceUsd)
+      expect(ranges.short.minUsd).toBeLessThan(ranges.short.maxUsd)
+      expect(ranges.short.minUsd).toBeGreaterThan(t.priceUsd)
+      expect(ranges.long.note.length).toBeGreaterThan(0)
+      expect(ranges.short.note.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('fallbackInsight: entryRanges が常に付与される', () => {
+    const ins = fallbackInsight(tickers[0], 'short')
+    expect(ins.entryRanges).toBeDefined()
+    expect(ins.entryRanges!.long.maxUsd).toBeGreaterThan(0)
   })
 
   it('decideTrade の判断が applyDecision で執行できる', () => {

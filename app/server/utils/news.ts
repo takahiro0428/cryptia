@@ -123,14 +123,19 @@ export async function getMarketNews(): Promise<NewsItem[]> {
  */
 export function filterNewsForAsset(items: NewsItem[], asset?: Asset): NewsItem[] {
   if (!asset) return items
-  const terms = [asset.symbol, asset.name, asset.nameJa]
-    .filter((t) => t.length >= 2)
-    .map((t) => t.toLowerCase())
+  // 英字タームは単語境界付きで照合する（SUI が "lawsuit"、ADA が "Canada" に
+  // 誤ヒットするのを防ぐ: ISSUE-P8-9）。和名は substring 照合
+  const asciiPatterns = [asset.symbol, asset.name]
+    .filter((t) => t.length >= 2 && /^[A-Za-z0-9 .&-]+$/.test(t))
+    .map((t) => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'))
+  const jaTerms = [asset.nameJa].filter((t) => t.length >= 2)
   const related: NewsItem[] = []
   const others: NewsItem[] = []
   for (const item of items) {
-    const title = item.title.toLowerCase()
-    if (terms.some((t) => title.includes(t))) related.push(item)
+    const hit =
+      asciiPatterns.some((re) => re.test(item.title)) ||
+      jaTerms.some((t) => item.title.includes(t))
+    if (hit) related.push(item)
     else others.push(item)
   }
   return [...related, ...others]

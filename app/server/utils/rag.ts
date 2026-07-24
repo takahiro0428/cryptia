@@ -44,23 +44,28 @@ export async function retrieveRelevantStrategies(
   const candidates = docs.filter((d) => d.id !== opts.excludeId)
   if (candidates.length === 0) return { docs: [], method: 'keyword' }
 
-  // --- ベクトル検索（Vertex Embeddings） ---
+  // --- ベクトル検索（Vertex Embeddings。クエリ/文書は非対称埋め込み: ISSUE-P8-4） ---
   const uncached = candidates.filter((d) => !embeddingCache.has(docKey(d)))
-  const toEmbed = [query, ...uncached.map((d) => `${d.name}\n${d.content}`)]
-  const vectors = await embedTexts(toEmbed)
-  if (vectors) {
-    const queryVec = vectors[0]
+  const [queryVectors, docVectors] = await Promise.all([
+    embedTexts([query], 'RETRIEVAL_QUERY'),
+    uncached.length > 0
+      ? embedTexts(uncached.map((d) => `${d.name}\n${d.content}`), 'RETRIEVAL_DOCUMENT')
+      : Promise.resolve([] as number[][]),
+  ])
+  if (queryVectors && docVectors) {
+    const queryVec = queryVectors[0]
     uncached.forEach((d, i) => {
       if (embeddingCache.size >= CACHE_MAX) {
         const first = embeddingCache.keys().next().value
         if (first) embeddingCache.delete(first)
       }
-      embeddingCache.set(docKey(d), vectors[i + 1])
+      embeddingCache.set(docKey(d), docVectors[i])
     })
     const scored = candidates
       .map((d) => ({ d, score: cosine(queryVec, embeddingCache.get(docKey(d)) ?? []) }))
       .sort((a, b) => b.score - a.score)
-      .filter((s) => s.score > 0.3)
+      // 非対称埋め込み（QUERY×DOCUMENT）の分布に合わせた関連度下限
+      .filter((s) => s.score > 0.35)
       .slice(0, limit)
     return { docs: scored.map((s) => s.d), method: 'vector' }
   }

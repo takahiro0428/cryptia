@@ -8,11 +8,14 @@
 
 | 項目 | 内容 |
 |------|------|
-| 入力 | `{ ticker: Ticker, horizon: 'short'\|'mid'\|'long', strategy?: StrategyDoc }` |
-| 検証 | assetId=銘柄マスタ照合 / 数値=有限・範囲 / sparkline≦500点 / strategy≦4000字 |
-| 処理 | ニュース収集（5分キャッシュ）→ 戦略注入プロンプト → Gemini（JSON モード・9s タイムアウト）→ 解析失敗時 `fallbackInsight` |
-| 出力 | `Insight`（stance/confidence/summary/reasons/risks/sources/engine/generatedAt） |
-| エラー | 400 `CRYPTIA-E301`（検証）。AI 障害は 200 + engine:'fallback'（BR-5） |
+| 入力 | `{ ticker: Ticker, horizon: 'short'\|'mid'\|'long', strategy?: StrategyDoc, library?: StrategyDoc[]（≦10件・RAG 検索対象） }` |
+| ヘッダー | `Authorization: Bearer <Firebase ID トークン>`（任意。認証済みは優遇レート枠 40/分） |
+| 検証 | assetId=銘柄マスタ照合 / 数値=有限・範囲 / sparkline≦500点 / strategy≦4000字 / library≦10件 |
+| 処理 | 銘柄関連優先のニュース収集（5分キャッシュ）→ ベクトル RAG 検索（Embeddings、失敗時キーワード）→ 戦略注入プロンプト → Gemini（JSON モード・9s タイムアウト）→ 解析失敗時 `fallbackInsight` |
+| 出力 | `Insight`（stance/confidence/summary/reasons/risks/**entryRanges（ロング/ショート別エントリーレンジ・現値±50% で検証）**/sources/engine/generatedAt） |
+| エラー | 400 `CRYPTIA-E301`（検証）/ 429 `CRYPTIA-E302` / 401 `CRYPTIA-E303`（認証必須環境）。AI 障害は 200 + engine:'fallback'（BR-5） |
+
+> /api/ai/decision・/api/ai/degen-decision も同様に `library` パラメータと Authorization ヘッダーを受け付ける。
 
 ### POST /api/ai/decision — デモトレード判断（F-04）
 

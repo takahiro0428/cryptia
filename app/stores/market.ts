@@ -38,7 +38,8 @@ export const useMarketStore = defineStore('market', {
     streaming: false,
     /** 期間別の実測ネットフロー（Binance テイカーフロー） */
     netFlows: {} as Partial<Record<FlowPeriod, { entries: FlowEntry[]; fetchedAt: number }>>,
-    netFlowLoading: false,
+    /** 取得中の期間（期間別に管理。単一フラグだと切替時に取得が黙って落ちる: ISSUE-P8-3） */
+    netFlowLoading: [] as FlowPeriod[],
     _pollTimer: null as ReturnType<typeof setInterval> | null,
     _ws: null as WebSocket | null,
     _wsRetryTimer: null as ReturnType<typeof setTimeout> | null,
@@ -160,6 +161,9 @@ export const useMarketStore = defineStore('market', {
           }
         }
         ws.onclose = () => {
+          // stop→start 直後に旧ソケットの close が後着した場合、新ソケットの参照を
+          // 破棄しない（孤児ソケット・二重接続の防止: ISSUE-P8-6）
+          if (this._ws !== ws) return
           this.streaming = false
           this._ws = null
           // 自動再接続（stopStreaming 済みならタイマーは張らない）
@@ -193,8 +197,8 @@ export const useMarketStore = defineStore('market', {
     async fetchNetFlows(period: FlowPeriod) {
       const cached = this.netFlows[period]
       if (cached && Date.now() - cached.fetchedAt < NET_FLOW_TTL_MS) return
-      if (this.netFlowLoading) return
-      this.netFlowLoading = true
+      if (this.netFlowLoading.includes(period)) return
+      this.netFlowLoading.push(period)
       try {
         const { interval, limit } = KLINE_PARAMS[period]
         const mapped = ASSETS.map((a) => ({ assetId: a.id, symbol: BINANCE_SYMBOLS[a.id] }))
@@ -236,7 +240,7 @@ export const useMarketStore = defineStore('market', {
           `[${ERROR_CODES.MARKET_FETCH_FAILED}] ネットフロー取得失敗（推定モデルで継続）: ${err instanceof Error ? err.message : err}`,
         )
       } finally {
-        this.netFlowLoading = false
+        this.netFlowLoading = this.netFlowLoading.filter((p) => p !== period)
       }
     },
   },

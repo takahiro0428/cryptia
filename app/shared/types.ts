@@ -42,6 +42,13 @@ export type Horizon = 'short' | 'mid' | 'long'
 
 export type Stance = 'bullish' | 'neutral' | 'bearish'
 
+/** おすすめエントリーレンジ（ロング/ショート別の指値ゾーン） */
+export interface EntryRange {
+  minUsd: number
+  maxUsd: number
+  note: string
+}
+
 /** AI（または フォールバック分析）が生成するインサイト */
 export interface Insight {
   assetId: string
@@ -52,6 +59,8 @@ export interface Insight {
   summary: string
   reasons: string[]
   risks: string[]
+  /** ロング/ショート別のおすすめエントリーレンジ */
+  entryRanges?: { long: EntryRange; short: EntryRange }
   /** 使用した情報ソースの明示（BR-4） */
   sources: string[]
   /** 'vertex-ai' = Gemini 生成 / 'fallback' = テクニカル指標ベース */

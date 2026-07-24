@@ -47,4 +47,14 @@ describe('ニュースの銘柄関連フィルタ', () => {
   it('asset 未指定はそのまま返す', () => {
     expect(filterNewsForAsset(items, undefined)).toEqual(items)
   })
+
+  it('英字シンボルは単語境界で照合し、部分一致の誤ヒットを防ぐ（ISSUE-P8-9 回帰）', () => {
+    const sui = ASSET_MAP.sui
+    const suiItems: NewsItem[] = [
+      { title: 'Exchange faces lawsuit over listing', url: '', source: 'S', publishedAt: 2 },
+      { title: 'SUI ecosystem TVL doubles', url: '', source: 'S', publishedAt: 1 },
+    ]
+    const filtered = filterNewsForAsset(suiItems, sui)
+    expect(filtered[0].title).toContain('SUI ecosystem') // lawsuit は誤ヒットしない
+  })
 })

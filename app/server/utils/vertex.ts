@@ -98,7 +98,10 @@ export async function generateWithVertex(
  * Vertex AI Embeddings（text-embedding-005）。ベクトル RAG の検索に使用する。
  * 未設定・失敗時は null（呼び出し元がキーワード検索へフォールバック）。
  */
-export async function embedTexts(texts: string[]): Promise<number[][] | null> {
+export async function embedTexts(
+  texts: string[],
+  taskType: 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY' = 'RETRIEVAL_DOCUMENT',
+): Promise<number[][] | null> {
   const cfg = vertexConfig()
   if (!cfg || texts.length === 0) return null
   try {
@@ -114,7 +117,7 @@ export async function embedTexts(texts: string[]): Promise<number[][] | null> {
         signal: controller.signal,
         headers: { Authorization: `Bearer ${token.token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          instances: texts.map((text) => ({ content: text.slice(0, 2000), task_type: 'RETRIEVAL_DOCUMENT' })),
+          instances: texts.map((text) => ({ content: text.slice(0, 2000), task_type: taskType })),
         }),
       })
       if (!res.ok) return null

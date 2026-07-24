@@ -14,8 +14,9 @@ const JUPITER_SWAP_URL = 'https://quote-api.jup.ag/v6/swap'
 /** SOL（wrapped）ミントアドレス。Jupiter スワップの入力側として使用 */
 export const SOL_MINT = 'So11111111111111111111111111111111111111112'
 export const LAMPORTS_PER_SOL = 1_000_000_000
-/** SPL Token プログラム（残高取得用） */
+/** SPL Token プログラム（残高取得用）。新興トークンには Token-2022 も実在する */
 const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
 
 /** ウォレット内の SPL トークン残高 */
 export interface TokenBalance {
@@ -156,6 +157,8 @@ export const useWalletStore = defineStore('wallet', {
         this.connected = false
         this.publicKey = ''
         this.solBalance = null
+        // 前ウォレットの残高が売りタブに残らないようクリア（ISSUE-P8-7）
+        this.tokenBalances = []
       }
     },
     async refreshBalance() {
@@ -180,10 +183,30 @@ export const useWalletStore = defineStore('wallet', {
       }
       void this.fetchTokenBalances()
     },
-    /** SPL トークン残高の取得（売り方向スワップ用: Phase 8 本格化） */
+    /**
+     * SPL トークン残高の取得（売り方向スワップ用: Phase 8 本格化）。
+     * SPL Token と Token-2022 の両プログラムを対象にする（ISSUE-P8-2:
+     * 新興トークンには Token-2022 ミントが実在し、片方だけだと売却不能になる）。
+     */
     async fetchTokenBalances() {
       if (!this.publicKey) return
-      try {
+      type RpcTokenAccounts = {
+        result?: {
+          value?: {
+            account?: {
+              data?: {
+                parsed?: {
+                  info?: {
+                    mint?: string
+                    tokenAmount?: { amount?: string; decimals?: number; uiAmount?: number }
+                  }
+                }
+              }
+            }
+          }[]
+        }
+      }
+      const queryProgram = async (programId: string): Promise<RpcTokenAccounts> => {
         const res = await fetch(SOLANA_RPC, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -191,40 +214,34 @@ export const useWalletStore = defineStore('wallet', {
             jsonrpc: '2.0',
             id: 2,
             method: 'getTokenAccountsByOwner',
-            params: [this.publicKey, { programId: TOKEN_PROGRAM_ID }, { encoding: 'jsonParsed' }],
+            params: [this.publicKey, { programId }, { encoding: 'jsonParsed' }],
           }),
         })
-        const data = (await res.json()) as {
-          result?: {
-            value?: {
-              account?: {
-                data?: {
-                  parsed?: {
-                    info?: {
-                      mint?: string
-                      tokenAmount?: { amount?: string; decimals?: number; uiAmount?: number }
-                    }
-                  }
-                }
-              }
-            }[]
-          }
-        }
+        return (await res.json()) as RpcTokenAccounts
+      }
+      try {
+        const results = await Promise.allSettled([
+          queryProgram(TOKEN_PROGRAM_ID),
+          queryProgram(TOKEN_2022_PROGRAM_ID),
+        ])
         const balances = new Map<string, TokenBalance>()
-        for (const entry of data.result?.value ?? []) {
-          const info = entry.account?.data?.parsed?.info
-          const amount = info?.tokenAmount
-          if (!info?.mint || !amount?.amount || typeof amount.decimals !== 'number') continue
-          const uiAmount = amount.uiAmount ?? 0
-          if (uiAmount <= 0) continue
-          // 同一ミントの複数トークンアカウントは合算する
-          const prev = balances.get(info.mint)
-          balances.set(info.mint, {
-            mint: info.mint,
-            amountRaw: prev ? String(BigInt(prev.amountRaw) + BigInt(amount.amount)) : amount.amount,
-            decimals: amount.decimals,
-            uiAmount: (prev?.uiAmount ?? 0) + uiAmount,
-          })
+        for (const r of results) {
+          if (r.status !== 'fulfilled') continue
+          for (const entry of r.value.result?.value ?? []) {
+            const info = entry.account?.data?.parsed?.info
+            const amount = info?.tokenAmount
+            if (!info?.mint || !amount?.amount || typeof amount.decimals !== 'number') continue
+            const uiAmount = amount.uiAmount ?? 0
+            if (uiAmount <= 0) continue
+            // 同一ミントの複数トークンアカウントは合算する
+            const prev = balances.get(info.mint)
+            balances.set(info.mint, {
+              mint: info.mint,
+              amountRaw: prev ? String(BigInt(prev.amountRaw) + BigInt(amount.amount)) : amount.amount,
+              decimals: amount.decimals,
+              uiAmount: (prev?.uiAmount ?? 0) + uiAmount,
+            })
+          }
         }
         this.tokenBalances = [...balances.values()].sort((a, b) => b.uiAmount - a.uiAmount)
       } catch {

@@ -85,15 +85,33 @@ const sellAmountRaw = computed(() => {
   const max = BigInt(bal.amountRaw)
   return (raw > max ? max : raw).toString()
 })
-/** 見積りの受取/概算 USD（buy: 支払 SOL 基準 / sell: 受取 SOL 基準） */
+/** 見積りの受取 SOL（buy: 支払 SOL / sell: 受取見込み SOL） */
 const quoteSolAmount = computed(() => {
   if (!quote.value) return 0
   return direction.value === 'buy'
     ? amountSol.value
     : Number(quote.value.outAmount) / LAMPORTS_PER_SOL
 })
+/** 実際に売却される数量（quote の入力側から導出。クランプ後の実行値: ISSUE-P8-1） */
+const executedSellAmount = computed(() => {
+  if (!quote.value || !sellBalance.value) return 0
+  return Number(quote.value.inAmount) / 10 ** sellBalance.value.decimals
+})
+/** 売却トークンの参照 USD 価値（スクリーナー価格ベース。取れない場合 0） */
+const sellTokenRefUsd = computed(() => {
+  const token = solana.tokens.find((t) => t.baseAddress === sellMint.value)
+  if (!token || !sellBalance.value) return 0
+  return token.priceUsd * Math.min(sellAmount.value, sellBalance.value.uiAmount)
+})
+/**
+ * ガード判定・表示用の概算 USD。
+ * 売りは「受取 SOL 価値」と「売却トークンの参照価値」の大きい方を採用する
+ * （高スリッページ売却で日次上限への計上が過小になるのを防ぐ: AUDIT-P8-2）
+ */
 const approxUsd = computed(() =>
-  direction.value === 'buy' ? amountSol.value * solPriceUsd.value : quoteSolAmount.value * solPriceUsd.value,
+  direction.value === 'buy'
+    ? amountSol.value * solPriceUsd.value
+    : Math.max(quoteSolAmount.value * solPriceUsd.value, sellTokenRefUsd.value),
 )
 
 function pickKnown(mint: string, symbol: string) {
@@ -126,6 +144,8 @@ async function fetchQuote() {
         ui.notify('売却するトークンと数量を指定してください', 'warn')
         return
       }
+      // 入力値を保有量にクランプして表示と実行値を一致させる（ISSUE-P8-1）
+      sellAmount.value = Math.min(sellAmount.value, sellBalance.value.uiAmount)
       quote.value = await wallet.getQuoteRaw(sellMint.value, SOL_MINT, sellAmountRaw.value)
     }
     showConfirm.value = true
@@ -455,7 +475,8 @@ useHead({ title: '実トレード | Cryptia' })
             </tr>
             <tr v-else>
               <td class="dim">売却</td>
-              <td class="mono">{{ sellAmount }} {{ symbolForMint(sellMint) }}</td>
+              <!-- 表示は入力値ではなく quote 由来の実行数量（ISSUE-P8-1） -->
+              <td class="mono">{{ fmtQty(executedSellAmount) }} {{ symbolForMint(sellMint) }}</td>
             </tr>
             <tr v-if="direction === 'buy'">
               <td class="dim">受け取り</td>

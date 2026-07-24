@@ -60,6 +60,14 @@ export function useFirebase(): Promise<FirebaseContext | null> {
           reject(e)
         })
       })
+      // リダイレクト方式のアカウント連携から復帰した場合の完了処理（ISSUE-P8-11）
+      try {
+        const { getRedirectResult } = await import('firebase/auth')
+        await getRedirectResult(auth)
+      } catch {
+        /* 復帰結果のエラー（連携済み等）は AccountLink 側の状態表示に委ねる */
+      }
+
       // 共有プロジェクト同居のため専用の名前付きデータベースを使用する
       // （Security Rules がデータベース単位になり、他アプリのルールと完全分離される）
       const databaseId = config.firebaseDatabaseId || 'cryptia'
@@ -77,13 +85,14 @@ export function useFirebase(): Promise<FirebaseContext | null> {
           }
         },
         async linkWithGoogle() {
-          const { GoogleAuthProvider, linkWithPopup } = await import('firebase/auth')
+          const { GoogleAuthProvider, linkWithPopup, linkWithRedirect } = await import('firebase/auth')
           const user = auth.currentUser
           if (!user) {
             throw new CryptiaError(ERROR_CODES.ACCOUNT_LINK_FAILED, 'サインイン状態を確認できません')
           }
+          const provider = new GoogleAuthProvider()
           try {
-            const result = await linkWithPopup(user, new GoogleAuthProvider())
+            const result = await linkWithPopup(user, provider)
             return { isAnonymous: result.user.isAnonymous, email: result.user.email }
           } catch (err) {
             const code = (err as { code?: string }).code
@@ -92,6 +101,17 @@ export function useFirebase(): Promise<FirebaseContext | null> {
                 ERROR_CODES.ACCOUNT_LINK_FAILED,
                 'この Google アカウントは既に別のデータに連携されています。別のアカウントをお試しください',
               )
+            }
+            // WebView（Phantom アプリ内ブラウザ等）ではポップアップが開けないため
+            // リダイレクト方式へフォールバックする（ISSUE-P8-11）。
+            // ページ遷移するため戻り値は到達しない（復帰時に getRedirectResult で完了する）
+            if (
+              code === 'auth/popup-blocked' ||
+              code === 'auth/operation-not-supported-in-this-environment' ||
+              code === 'auth/cancelled-popup-request'
+            ) {
+              await linkWithRedirect(user, provider)
+              return { isAnonymous: true, email: null }
             }
             throw new CryptiaError(
               ERROR_CODES.ACCOUNT_LINK_FAILED,

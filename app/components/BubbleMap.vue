@@ -71,7 +71,10 @@ function syncNodes() {
 function physicsStep() {
   const cx = width / 2
   const cy = height / 2
+  // ドラッグ中ノードには力を加算しない（積分がスキップされるため速度が減衰なしで
+  // 蓄積し、離した瞬間に吹き飛ぶ: ISSUE-P8-10）
   for (const n of nodes) {
+    if (n.id === dragId) continue
     // 中心へのごく弱い引力（強すぎると全バブルが中央に密集して読めなくなる）
     n.vx += (cx - n.x) * 0.00035
     n.vy += (cy - n.y) * 0.00035
@@ -87,10 +90,14 @@ function physicsStep() {
       const minDist = a.r + b.r + Math.min(width, height) * 0.06
       if (dist < minDist) {
         const push = ((minDist - dist) / dist) * 0.1
-        a.vx -= dx * push
-        a.vy -= dy * push
-        b.vx += dx * push
-        b.vy += dy * push
+        if (a.id !== dragId) {
+          a.vx -= dx * push
+          a.vy -= dy * push
+        }
+        if (b.id !== dragId) {
+          b.vx += dx * push
+          b.vy += dy * push
+        }
       }
     }
   }
@@ -102,10 +109,14 @@ function physicsStep() {
     const b = byId.get(f.toAssetId)
     if (!a || !b) continue
     const strength = 0.00012 * (f.amountUsd / maxAmount)
-    a.vx += (b.x - a.x) * strength
-    a.vy += (b.y - a.y) * strength
-    b.vx += (a.x - b.x) * strength
-    b.vy += (a.y - b.y) * strength
+    if (a.id !== dragId) {
+      a.vx += (b.x - a.x) * strength
+      a.vy += (b.y - a.y) * strength
+    }
+    if (b.id !== dragId) {
+      b.vx += (a.x - b.x) * strength
+      b.vy += (a.y - b.y) * strength
+    }
   }
   for (const n of nodes) {
     // ドラッグ中のバブルはポインタ追従が優先（物理積分をスキップ）
