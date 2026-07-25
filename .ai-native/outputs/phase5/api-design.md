@@ -56,7 +56,7 @@
 | GET `/api/solana/screen` | スクリーニング用 Solana ペアの**多ソース収集**（search + token-boosts + token-profiles → tokens 解決、pairAddress で重複排除。search 単独では Solana ペアが空になる本番事象への対策）。全ソース空は 502 扱いで空リストをキャッシュしない | 20s |
 | GET `/api/solana/pairs?addrs=` | 保有ペアの価格中継。addrs は base58・1〜30 件を検証（400 `CRYPTIA-E301`） | 8s |
 | GET `/api/solana/fresh` | 新規上場（48h 以内）発見 + シグナル収集（F-06 スナイプ）。token-profiles + **token-boosts** → 代表ペア解決（上位 25 件）→ Solana RPC `getMultipleAccounts`（mint/freeze 権限）→ 同名再発行照合（監査通過見込みのシンボル優先で 8 枠）。スコアリングは shared/snipeScoring.ts でクライアントと共通。クライアント側でローリング監視プール（48h 窓・上限 50 件）へ蓄積 | 90s |
-| POST `/api/solana/rpc` | Solana RPC の読み取り専用中継（宛先固定・許可メソッドは `getBalance`/`getTokenAccountsByOwner` のみ・アドレス検証あり）。署名/送信系メソッドは一切許可しない（BR-1） | なし（IP クォータ + 上流バジェット rpc 30/分で保護） |
+| POST `/api/solana/rpc` | Solana RPC の許可制中継（宛先固定・メソッド別パラメータ検証）。読み取り: `getBalance`/`getTokenAccountsByOwner`。送信系: `sendTransaction`（**署名済み** Tx の中継のみ・base64 検証・サイズ上限）/`getLatestBlockhash`/`getSignatureStatuses`（F-13 ボットウォレット用。プロキシは署名能力を持たない: BR-1 改訂。署名済みであれば第三者の Tx も中継し得るオープンリレー性は IP クォータ + 上流バジェットで有界 — 悪用は正規ユーザーの枠を枯渇させ得る既知の残存リスク） | なし（IP クォータ + 上流バジェット rpc 30/分で保護） |
 
 上流失敗は 502 `CRYPTIA-E102`（DEX）に正規化。部分失敗（RPC・再発行照合）はシグナル null で継続（原則4）。
 

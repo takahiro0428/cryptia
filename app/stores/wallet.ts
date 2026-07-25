@@ -9,7 +9,8 @@ const GUARD_KEY = 'trade-guard'
 const LOG_KEY = 'live-trade-log'
 const SOLANA_RPC = 'https://api.mainnet-beta.solana.com'
 const JUPITER_QUOTE_URL = 'https://quote-api.jup.ag/v6/quote'
-const JUPITER_SWAP_URL = 'https://quote-api.jup.ag/v6/swap'
+/** Jupiter スワップ Tx 生成 API（ボットウォレット自動実行からも再利用: 原則3） */
+export const JUPITER_SWAP_URL = 'https://quote-api.jup.ag/v6/swap'
 
 /** SOL（wrapped）ミントアドレス。Jupiter スワップの入力側として使用 */
 export const SOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -247,7 +248,15 @@ export const useWalletStore = defineStore('wallet', {
      * 公開 RPC はブラウザ発リクエストを遮断することがあり、残高が「取得中」のまま
      * 固まる本番障害の原因になった。プロキシも失敗したら次回は直接から再試行（自己回復）。
      */
-    async _rpc<T>(method: 'getBalance' | 'getTokenAccountsByOwner', params: unknown[]): Promise<T> {
+    async _rpc<T>(
+      method:
+        | 'getBalance'
+        | 'getTokenAccountsByOwner'
+        | 'sendTransaction'
+        | 'getLatestBlockhash'
+        | 'getSignatureStatuses',
+      params: unknown[],
+    ): Promise<T> {
       const body = { jsonrpc: '2.0', id: 1, method, params }
       if (rpcVia === 'direct') {
         try {
@@ -354,6 +363,42 @@ export const useWalletStore = defineStore('wallet', {
       } catch {
         /* 表示のみの問題。次回 refresh で再試行（原則4） */
       }
+    },
+    /**
+     * 接続中ウォレットから SOL を送金する（ボットウォレットへの入金用。
+     * 署名は接続中ウォレット内 = ここが「一度だけの署名」）。
+     */
+    async sendSol(to: string, amountSol: number): Promise<string> {
+      const provider = activeProvider
+      if (!provider || !this.connected || !this.publicKey) {
+        throw new CryptiaError(ERROR_CODES.WALLET_NOT_CONNECTED, 'ウォレットが接続されていません', false)
+      }
+      const lamports = Math.round(amountSol * LAMPORTS_PER_SOL)
+      if (!Number.isFinite(lamports) || lamports <= 0) {
+        throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '送金額が不正です')
+      }
+      const { PublicKey, SystemProgram, Transaction } = await import('@solana/web3.js')
+      const blockhash = await this._rpc<{ result?: { value?: { blockhash?: string } } }>(
+        'getLatestBlockhash',
+        [{ commitment: 'finalized' }],
+      )
+      const recentBlockhash = blockhash.result?.value?.blockhash
+      if (!recentBlockhash) {
+        throw new CryptiaError(ERROR_CODES.DEX_FETCH_FAILED, 'blockhash を取得できません（RPC 混雑）')
+      }
+      const tx = new Transaction({
+        feePayer: new PublicKey(this.publicKey),
+        recentBlockhash,
+      }).add(
+        SystemProgram.transfer({
+          fromPubkey: new PublicKey(this.publicKey),
+          toPubkey: new PublicKey(to),
+          lamports,
+        }),
+      )
+      const { signature } = await provider.signAndSendTransaction(tx)
+      void this.refreshBalance()
+      return signature
     },
     setGuard(patch: Partial<TradeGuardConfig>) {
       this.guard = { ...this.guard, ...patch }

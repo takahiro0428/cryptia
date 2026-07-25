@@ -17,7 +17,7 @@
 | DB | Firestore（+ クライアント localStorage フォールバック） | uid 単位のドキュメント指向データ（履歴・戦略）に適合。Security Rules で行レベル制御。未設定でもローカルで全機能動作 |
 | 市場データ | CoinGecko API（キー不要・CORS 可）+ Binance 公開 API（補助） | リアルタイム価格・時価総額・出来高。無認証で PWA から直接取得可能 |
 | Solana データ | DexScreener 公開 API | Solana 新興ペアの流動性・出来高・価格変動を無認証で取得 |
-| Solana 取引 | Phantom（window.solana）+ @solana/web3.js + Jupiter API | 秘密鍵非保持（BR-1）。Jupiter は Solana スワップの標準アグリゲーター |
+| Solana 取引 | Phantom（window.solana）+ @solana/web3.js + Jupiter API | メインウォレットの秘密鍵は非保持（BR-1 改訂。F-13 ボットウォレットは専用生成鍵を端末内で暗号化保管）。Jupiter は Solana スワップの標準アグリゲーター |
 | 認証 | Firebase Anonymous Auth（MVP） | 摩擦なしで uid を確保し Firestore Rules と連動 |
 | ホスティング | Firebase Hosting（静的） + Cloud Functions（API） | オペレーター指定。CDN 配信で NFR の初期表示要件を満たす |
 | CI/CD | GitHub Actions（既存 deploy.yml パイプライン） | 既存の単体→結合→シナリオ→デプロイのテストゲート構造を再利用（原則3） |

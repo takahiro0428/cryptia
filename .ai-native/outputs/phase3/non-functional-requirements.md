@@ -14,7 +14,7 @@
 
 | 項目 | 基準 |
 |------|------|
-| データ機密度 | 個人資産情報（デモ履歴・戦略・実トレードログ）= 中機密。秘密鍵 = 取り扱わない（最重要） |
+| データ機密度 | 個人資産情報（デモ履歴・戦略・実トレードログ）= 中機密。メインウォレットの秘密鍵 = 取り扱わない（最重要）。F-13 ボットウォレットは専用生成鍵のみを端末内で暗号化保管（BR-1 改訂） |
 | 認証 | Firebase 匿名認証（MVP）。Firestore Security Rules で uid 単位のアクセス制御 |
 | API キー | サーバー側（Cloud Functions / Nitro server）でのみ保持。クライアントへ露出しない |
 | シークレット管理 | repository secrets（GitHub Actions）+ GCP Secret Manager / 環境変数 |
