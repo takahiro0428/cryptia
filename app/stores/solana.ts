@@ -2,8 +2,8 @@ import { defineStore } from 'pinia'
 import { decideDegenTrade } from '~/shared/degenAdvisor'
 import {
   DEX_PAIRS_URL,
-  DEX_SEARCH_URL,
   discoverFreshPairs,
+  discoverScreeningPairs,
   extractSnsSignals,
   isValidAddress,
   toToken,
@@ -211,17 +211,51 @@ export const useSolanaStore = defineStore('solana', {
         throw err
       }
     },
+    /** ペア群 → 表示用トークンリスト（メジャーペア除外）への変換 */
+    _parseScreenPairs(pairs: DexPair[]): SolanaToken[] {
+      return pairs
+        .map(toToken)
+        .filter((t): t is SolanaToken => t !== null)
+        // SOL/USDC 等のメジャーペア自体は除外し、新興トークン側に絞る
+        .filter((t) => !['SOL', 'WSOL', 'USDC', 'USDT'].includes(t.baseSymbol.toUpperCase()))
+    },
     async fetchTokens(force = false) {
       this.loading = this.tokens.length === 0 || (force && this.usingMockData)
       if (force) this._dexVia = 'direct'
       try {
-        const data = await this._fetchDex<{ pairs?: DexPair[] }>(DEX_SEARCH_URL, '/api/solana/screen')
-        const tokens = (data.pairs ?? [])
-          .map(toToken)
-          .filter((t): t is SolanaToken => t !== null)
-          // SOL/USDC 等のメジャーペア自体は除外し、新興トークン側に絞る
-          .filter((t) => !['SOL', 'WSOL', 'USDC', 'USDT'].includes(t.baseSymbol.toUpperCase()))
-        if (tokens.length === 0) throw new Error('DexScreener の応答に Solana ペアがありません')
+        let tokens: SolanaToken[] = []
+        // 経路の成否は「使えるトークンが得られたか」で判定する。企業ネットワーク等では
+        // 直接取得が HTTP 200 のまま空・改変応答を返すことがあり、トランスポート成功
+        // だけで判定するとプロキシへ切り替わらない（本番障害 CRYPTIA-E102 の実例）
+        if (this._dexVia === 'direct') {
+          try {
+            const pairs = await discoverScreeningPairs(async <T>(url: string): Promise<T> => {
+              const res = await fetch(url, { signal: AbortSignal.timeout(8_000) })
+              if (!res.ok) throw new Error(`DexScreener HTTP ${res.status}`)
+              return (await res.json()) as T
+            })
+            tokens = this._parseScreenPairs(pairs)
+          } catch {
+            tokens = []
+          }
+          if (tokens.length === 0) this._dexVia = 'proxy'
+        }
+        if (tokens.length === 0) {
+          try {
+            const data = await $fetch<{ pairs?: DexPair[] }>('/api/solana/screen', {
+              timeout: 25_000,
+            })
+            tokens = this._parseScreenPairs(data.pairs ?? [])
+          } catch (err) {
+            this._dexVia = 'direct'
+            throw err
+          }
+        }
+        if (tokens.length === 0) {
+          // プロキシ応答も内容 0 件 = 上流全体の劣化。次回は直接から再試行する（自己回復）
+          this._dexVia = 'direct'
+          throw new Error('DexScreener の応答に Solana ペアがありません')
+        }
         // 保有中トークンの価格は必ず維持する（リストから外れても追跡）
         const held = this.tokens.filter(
           (t) =>

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEX_BOOSTS_URL,
   DEX_PROFILES_URL,
+  DEX_SEARCH_URL,
   discoverFreshPairs,
+  discoverScreeningPairs,
   extractSnsSignals,
   isValidAddress,
   toToken,
@@ -133,5 +136,63 @@ describe('dexscreener: 新規上場発見パイプライン', () => {
       throw new Error('batch failed')
     }
     await expect(discoverFreshPairs(fetchJson, 48)).resolves.toEqual([])
+  })
+})
+
+describe('dexscreener: スクリーニングの多ソース収集', () => {
+  it('search が Solana ペアを返さなくても boosts/profiles 由来で補完される（E102 再発対策）', async () => {
+    const memePair = pair({
+      pairAddress: 'PAIRmeme111111111111111111111111111111111',
+      baseToken: { address: MINT_B, name: 'Meme', symbol: 'MEME' },
+    })
+    const fetchJson = async <T>(url: string): Promise<T> => {
+      // search は他チェーンのペアのみ返す（本番で観測された「Solana ペアなし」状態）
+      if (url === DEX_SEARCH_URL) return { pairs: [pair({ chainId: 'ethereum' })] } as T
+      if (url === DEX_BOOSTS_URL) return [{ chainId: 'solana', tokenAddress: MINT_B }] as T
+      if (url === DEX_PROFILES_URL) return [] as T
+      return { pairs: [memePair] } as T // tokens バッチ
+    }
+    const pairs = await discoverScreeningPairs(fetchJson)
+    expect(pairs).toHaveLength(1)
+    expect(pairs[0].pairAddress).toBe(memePair.pairAddress)
+  })
+
+  it('複数ソースの同一ペアは pairAddress で重複排除される', async () => {
+    const shared = pair()
+    const fetchJson = async <T>(url: string): Promise<T> => {
+      if (url === DEX_SEARCH_URL) return { pairs: [shared] } as T
+      if (url === DEX_BOOSTS_URL) return [{ chainId: 'solana', tokenAddress: MINT_A }] as T
+      if (url === DEX_PROFILES_URL) return [] as T
+      return { pairs: [shared] } as T
+    }
+    const pairs = await discoverScreeningPairs(fetchJson)
+    expect(pairs).toHaveLength(1)
+  })
+
+  it('同一トークンの複数プールは最も流動性の高い代表ペアへ集約される', async () => {
+    const poolSmall = pair({
+      pairAddress: 'PAIRpool1111111111111111111111111111111111',
+      liquidity: { usd: 10_000 },
+    })
+    const poolBig = pair({
+      pairAddress: 'PAIRpool2222222222222222222222222222222222',
+      liquidity: { usd: 90_000 },
+    })
+    const fetchJson = async <T>(url: string): Promise<T> => {
+      if (url === DEX_SEARCH_URL) return { pairs: [poolSmall] } as T
+      if (url === DEX_BOOSTS_URL) return [{ chainId: 'solana', tokenAddress: MINT_A }] as T
+      if (url === DEX_PROFILES_URL) return [] as T
+      return { pairs: [poolBig] } as T
+    }
+    const pairs = await discoverScreeningPairs(fetchJson)
+    expect(pairs).toHaveLength(1)
+    expect(pairs[0].pairAddress).toBe(poolBig.pairAddress)
+  })
+
+  it('全ソース失敗でも例外にせず空リストで返す（呼び出し側でモック劣化: 原則4）', async () => {
+    const fetchJson = async <T>(): Promise<T> => {
+      throw new Error('all blocked')
+    }
+    await expect(discoverScreeningPairs(fetchJson)).resolves.toEqual([])
   })
 })
