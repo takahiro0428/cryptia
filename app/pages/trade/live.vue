@@ -547,6 +547,9 @@ useHead({ title: '実トレード | Cryptia' })
       </div>
     </div>
 
+    <!-- 自動実行（ボットウォレット）: 一度の署名（入金）で以後の署名を自動化（F-13） -->
+    <BotAutoTrade />
+
     <!-- 取引履歴 -->
     <section class="card">
       <div class="card-title">
