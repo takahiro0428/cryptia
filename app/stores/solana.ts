@@ -12,6 +12,7 @@ import {
 import { ERROR_CODES, formatError } from '~/shared/errors'
 import { mockSolanaTokens } from '~/shared/mockData'
 import {
+  passesMinimalAudit,
   scoreFreshToken,
   SNIPE_LADDER_RULES,
   SNIPE_MAX_AGE_HOURS,
@@ -57,13 +58,40 @@ const ARCHIVE_ORDERS_MAX = 100
 /** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
 const ARCHIVE_ORDERS_KEEP = 10
 
-export type DegenMethod = 'ai' | 'ladder' | 'snipe'
+export type DegenMethod = 'ai' | 'ladder' | 'snipe' | 'auto-snipe'
 
 export const DEGEN_METHOD_LABELS: Record<DegenMethod, string> = {
   ladder: 'ラダー',
   ai: 'AI 取引',
   snipe: 'スナイプ',
+  'auto-snipe': '自動スナイプ',
 }
+
+/** 自動スナイプ（常時監視）の設定 */
+export interface AutoSnipeConfig {
+  /** 最大同時ポジション数（1 枠あたり予算 = 割当資金 / 本値） */
+  maxPositions: number
+  /** true = 監査で「要注意」判定も許容する（既定は「候補」のみ） */
+  allowCaution: boolean
+}
+
+export const DEFAULT_AUTO_SNIPE: AutoSnipeConfig = { maxPositions: 5, allowCaution: false }
+
+/** 自動スナイプ設定の正規化（開始時・復元時の両方で同じクランプを通す） */
+export function normalizeAutoSnipe(cfg?: Partial<AutoSnipeConfig>): AutoSnipeConfig {
+  const raw = Number(cfg?.maxPositions)
+  return {
+    maxPositions: Number.isFinite(raw)
+      ? Math.min(10, Math.max(1, Math.round(raw)))
+      : DEFAULT_AUTO_SNIPE.maxPositions,
+    allowCaution: cfg?.allowCaution === true,
+  }
+}
+
+/** 自動スナイプ: 監視データがこの時間より古い場合は新規エントリーを見送る */
+const AUTO_SNIPE_MAX_DATA_AGE_MS = 5 * 60 * 1000
+/** 自動スナイプ: これ未満の残余予算ではエントリーしない */
+const AUTO_SNIPE_MIN_ENTRY_USD = 10
 
 interface PositionMeta {
   entryPriceUsd: number
@@ -89,6 +117,9 @@ interface PersistedDegen {
   watchedPairs: string[]
   positionMeta: Record<string, PositionMeta>
   archives: DegenArchive[]
+  /** 自動スナイプの設定・エントリー済みペア（追加フィールド: 旧データは既定値で復元） */
+  autoSnipe?: AutoSnipeConfig
+  enteredPairs?: string[]
 }
 
 /**
@@ -120,6 +151,10 @@ export const useSolanaStore = defineStore('solana', {
     watchedPairs: [] as string[],
     positionMeta: {} as Record<string, PositionMeta>,
     archives: [] as DegenArchive[],
+    /** 自動スナイプの設定 */
+    autoSnipe: { ...DEFAULT_AUTO_SNIPE } as AutoSnipeConfig,
+    /** 自動スナイプで既にエントリーしたペア（全決済後の再エントリーを防ぐ） */
+    enteredPairs: [] as string[],
     ticking: false,
     restored: false,
     _timer: null as ReturnType<typeof setInterval> | null,
@@ -140,6 +175,12 @@ export const useSolanaStore = defineStore('solana', {
     /** スナイプおすすめ = 「候補」判定の上位 */
     freshRecommended(state): SnipeScore[] {
       return state.freshTokens.filter((s) => s.verdict === 'candidate').slice(0, 3)
+    },
+    /** 自動スナイプ: 現在の監査基準を通過している新規上場トークン数（監視ステータス表示用） */
+    freshAuditPassedCount(state): number {
+      return state.freshTokens.filter((s) =>
+        passesMinimalAudit(s, { allowCaution: state.autoSnipe.allowCaution }),
+      ).length
     },
     /** スナイプ銘柄はスクリーニングリスト外のこともあるため freshTokens も探索する */
     tokenOf: (state) => (pairAddress: string): SolanaToken | undefined =>
@@ -167,6 +208,9 @@ export const useSolanaStore = defineStore('solana', {
         this.watchedPairs = saved.watchedPairs ?? []
         this.positionMeta = saved.positionMeta ?? {}
         this.archives = saved.archives ?? []
+        // 復元時も開始時と同じクランプを通す（別バージョン・改変データへの防御）
+        this.autoSnipe = saved.autoSnipe ? normalizeAutoSnipe(saved.autoSnipe) : { ...DEFAULT_AUTO_SNIPE }
+        this.enteredPairs = saved.enteredPairs ?? []
         if (saved.running && this.portfolio) this.startTicking()
       }
       this.restored = true
@@ -180,6 +224,8 @@ export const useSolanaStore = defineStore('solana', {
         watchedPairs: [...this.watchedPairs],
         positionMeta: JSON.parse(JSON.stringify(this.positionMeta)),
         archives: JSON.parse(JSON.stringify(this.archives)),
+        autoSnipe: { ...this.autoSnipe },
+        enteredPairs: [...this.enteredPairs],
       }
       // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）
       payload.archives = fitArchivesToBudget(payload.archives, (a) =>
@@ -292,9 +338,13 @@ export const useSolanaStore = defineStore('solana', {
       if (this._pricesBusy || this.usingMockData) return
       // セッションなし（portfolio=null）の間は無駄な取得をしない（クォータ浪費防止）
       if (!this.portfolio) return
-      const targets = new Set<string>(this.watchedPairs)
-      for (const p of this.portfolio.positions) targets.add(p.assetId)
-      const addrs = [...targets].filter(isValidAddress).slice(0, 30)
+      // pairs API の 30 件制約に対し保有ポジションを優先する
+      // （watchedPairs が多い場合でも現役ポジションの価格が必ず更新される: ISSUE-P9-M5）
+      const targets: string[] = this.portfolio.positions.map((p) => p.assetId)
+      for (const addr of this.watchedPairs) {
+        if (!targets.includes(addr)) targets.push(addr)
+      }
+      const addrs = targets.filter(isValidAddress).slice(0, 30)
       if (addrs.length === 0) return
       this._pricesBusy = true
       try {
@@ -373,14 +423,22 @@ export const useSolanaStore = defineStore('solana', {
         }
       })
     },
-    /** セッション開始。ladder/snipe は即時等分エントリー、ai はティックごとに判断 */
-    async start(allocatedUsd: number, pairAddresses: string[], method: DegenMethod) {
+    /**
+     * セッション開始。ladder/snipe は即時等分エントリー、ai はティックごとに判断、
+     * auto-snipe は選択不要 — 常時監視で監査通過トークンへ随時エントリーする。
+     */
+    async start(
+      allocatedUsd: number,
+      pairAddresses: string[],
+      method: DegenMethod,
+      autoConfig?: Partial<AutoSnipeConfig>,
+    ) {
       const ui = useUiStore()
       if (this.running) {
         ui.notify('魔界トレードは既に実行中です', 'warn')
         return
       }
-      if (pairAddresses.length === 0) {
+      if (method !== 'auto-snipe' && pairAddresses.length === 0) {
         ui.notify('取引対象のトークンを選択してください', 'warn')
         return
       }
@@ -391,10 +449,14 @@ export const useSolanaStore = defineStore('solana', {
         this.watchedPairs = [...pairAddresses]
         this.method = method
         this.ladderRules =
-          method === 'snipe' ? [...SNIPE_LADDER_RULES] : [...DEFAULT_LADDER_RULES]
+          method === 'snipe' || method === 'auto-snipe'
+            ? [...SNIPE_LADDER_RULES]
+            : [...DEFAULT_LADDER_RULES]
         this.positionMeta = {}
+        this.enteredPairs = []
+        if (method === 'auto-snipe') this.autoSnipe = normalizeAutoSnipe(autoConfig)
 
-        if (method !== 'ai') {
+        if (method === 'ladder' || method === 'snipe') {
           // ラダー/スナイプ方式: 割当資金を等分して即時エントリーし、以後は出口ルールのみ実行
           const strategyName = method === 'snipe' ? '新規上場スナイプ' : 'ラダーロジック'
           const perToken = allocatedUsd / pairAddresses.length
@@ -420,7 +482,13 @@ export const useSolanaStore = defineStore('solana', {
         this.startTicking()
         this._persist()
         const label =
-          method === 'ladder' ? 'ラダーロジック' : method === 'snipe' ? '新規上場スナイプ' : 'AI 取引'
+          method === 'ladder'
+            ? 'ラダーロジック'
+            : method === 'snipe'
+              ? '新規上場スナイプ'
+              : method === 'auto-snipe'
+                ? '自動スナイプ（常時監視）'
+                : 'AI 取引'
         ui.notify(`魔界トレードを開始しました（${label} / $${allocatedUsd.toLocaleString()}）`)
       } catch (err) {
         const { code, message } = formatError(err)
@@ -479,6 +547,101 @@ export const useSolanaStore = defineStore('solana', {
       this._persist()
       useUiStore().notify('魔界トレードのセッションを終了し、結果を過去セッションに保存しました')
     },
+    /**
+     * 自動スナイプ: 全量決済済みペアを監視対象から外す。
+     * pairs API の 30 件制約の枠を現役ポジションのために温存する
+     * （再エントリーの禁止は enteredPairs が別途担うため、剪定しても安全）。
+     * 照合対象（新規上場 48h 窓）に現れ得ない古いエントリー履歴も上限で間引く。
+     */
+    _pruneClosedAutoPairs() {
+      if (this.method !== 'auto-snipe' || !this.portfolio) return
+      this.watchedPairs = this.watchedPairs.filter(
+        (addr) => positionOf(this.portfolio!, addr) !== undefined,
+      )
+      for (const addr of Object.keys(this.positionMeta)) {
+        if (!this.watchedPairs.includes(addr)) delete this.positionMeta[addr]
+      }
+      if (this.enteredPairs.length > 200) this.enteredPairs = this.enteredPairs.slice(-200)
+    },
+    /**
+     * 自動スナイプ（常時監視）の新規エントリー処理。
+     * 新規上場リストを更新し、最低限の監査（passesMinimalAudit）を通過した
+     * トークンへ、空き枠がある限り等分予算でエントリーする。
+     * 一度エントリーしたペアには再エントリーしない（ラグ後の再急騰への誘い込み対策）。
+     */
+    async _autoSnipeEntries(session: number) {
+      await this.fetchFreshTokens()
+      if (this._session !== session || !this.running || !this.portfolio) return
+      // 参考データ（モック）や古い監視データでは実勢と乖離するためエントリーしない
+      if (this.usingMockData) return
+      if (Date.now() - this.freshFetchedAt > AUTO_SNIPE_MAX_DATA_AGE_MS) return
+
+      const openPositions = this.portfolio.positions.length
+      const slots = Math.max(0, this.autoSnipe.maxPositions - openPositions)
+      if (slots === 0) return
+      const perSlot = this.portfolio.initialUsd / this.autoSnipe.maxPositions
+
+      // 1) 監査通過・未エントリーの候補を空き枠の数だけ確定する
+      const candidates: SnipeScore[] = []
+      for (const score of this.freshTokens) {
+        if (candidates.length >= slots) break
+        if (!passesMinimalAudit(score, { allowCaution: this.autoSnipe.allowCaution })) continue
+        const addr = score.token.pairAddress
+        if (this.enteredPairs.includes(addr)) continue
+        if (positionOf(this.portfolio, addr)) continue
+        candidates.push(score)
+      }
+      if (candidates.length === 0) return
+
+      // 2) 執行直前に候補の価格を個別取得で最新化する（監視キャッシュは最大 2 分前のため）。
+      //    取得失敗時は監視価格で継続（鮮度は 5 分ガード内に有界。原則4: 劣化継続）
+      try {
+        const addrs = candidates.map((s) => s.token.pairAddress).filter(isValidAddress)
+        const data = await this._fetchDex<{ pairs?: DexPair[] }>(
+          `${DEX_PAIRS_URL}${addrs.join(',')}`,
+          `/api/solana/pairs?addrs=${addrs.join(',')}`,
+        )
+        const priceByPair = new Map<string, number>()
+        for (const p of data.pairs ?? []) {
+          const token = toToken(p)
+          if (token) priceByPair.set(token.pairAddress, token.priceUsd)
+        }
+        for (const s of candidates) {
+          const price = priceByPair.get(s.token.pairAddress)
+          if (price) s.token.priceUsd = price
+        }
+      } catch {
+        /* 直前価格の取得失敗は監視価格で継続 */
+      }
+      if (this._session !== session || !this.running || !this.portfolio) return
+
+      // 3) エントリー実行
+      for (const score of candidates) {
+        if (!this.portfolio) break
+        const addr = score.token.pairAddress
+        const notionalUsd = Math.min(perSlot, this.portfolio.cashUsd)
+        if (notionalUsd < AUTO_SNIPE_MIN_ENTRY_USD) break
+        if (score.token.priceUsd <= 0) continue
+        try {
+          const result = executeOrder(this.portfolio, {
+            assetId: addr,
+            side: 'buy',
+            notionalUsd,
+            priceUsd: score.token.priceUsd,
+            reason: `自動スナイプ: 監査通過（スコア ${score.total}・${score.verdict === 'candidate' ? '候補' : '要注意'}）の新規上場 ${score.token.baseSymbol} へエントリー`,
+            strategy: '自動スナイプ',
+          })
+          this.portfolio = result.portfolio
+          this.positionMeta[addr] = { entryPriceUsd: score.token.priceUsd, triggered: [] }
+          this.enteredPairs.push(addr)
+          if (!this.watchedPairs.includes(addr)) this.watchedPairs.push(addr)
+        } catch (err) {
+          // 資金不足等は記録して継続（原則4）
+          const { code, message } = formatError(err)
+          console.warn(`[${code}] ${message}`)
+        }
+      }
+    },
     async tick() {
       if (this.ticking || !this.running || !this.portfolio) return
       this.ticking = true
@@ -487,6 +650,13 @@ export const useSolanaStore = defineStore('solana', {
         await this.fetchTokens()
         // await 中にセッションが終了/再開始されていたら旧判断を執行しない（ISSUE-3）
         if (this._session !== session || !this.running || !this.portfolio) return
+
+        // 自動スナイプ: 監視 → 監査 → 随時エントリー（出口は下のラダー共通処理）
+        if (this.method === 'auto-snipe') {
+          await this._autoSnipeEntries(session)
+          if (this._session !== session || !this.running || !this.portfolio) return
+        }
+
         const strategy = useStrategyStore().docFor('solana')
         const prices = this.priceMap
 
@@ -501,7 +671,12 @@ export const useSolanaStore = defineStore('solana', {
             if (!pos) continue
             const meta = this.positionMeta[addr]
             if (!meta) continue
-            const strategyName = this.method === 'snipe' ? '新規上場スナイプ' : 'ラダーロジック'
+            const strategyName =
+              this.method === 'snipe'
+                ? '新規上場スナイプ'
+                : this.method === 'auto-snipe'
+                  ? '自動スナイプ'
+                  : 'ラダーロジック'
             const fired = checkLadder(meta.entryPriceUsd, token.priceUsd, this.ladderRules, meta.triggered)
             for (const { index, rule } of fired) {
               const current = positionOf(this.portfolio, addr)
@@ -580,6 +755,9 @@ export const useSolanaStore = defineStore('solana', {
             }
           }
         }
+
+        // 自動スナイプ: 全量決済済みペアの監視を剪定（価格取得 30 件枠の温存: ISSUE-P9-M5）
+        if (this.method === 'auto-snipe') this._pruneClosedAutoPairs()
 
         if (this.portfolio) this.portfolio = recordEquity(this.portfolio, this.priceMap)
         this._persist()
