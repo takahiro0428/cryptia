@@ -258,8 +258,11 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         <template v-if="usesFresh(method)">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
             <span class="xs faint">
-              新規上場トークン {{ solana.freshTokens.length }} 件
-              <template v-if="solana.freshFetchedAt">（更新: {{ fmtAgo(solana.freshFetchedAt) }}）</template>
+              監視中 {{ solana.freshTokens.length }} 件
+              <template v-if="solana.freshTokens.length > solana.freshDisplay.length">
+                / おすすめ上位 {{ solana.freshDisplay.length }} 件を表示
+              </template>
+              <template v-if="solana.freshFetchedAt">（プール更新: {{ fmtAgo(solana.freshFetchedAt) }}。各トークンの情報は最終確認時点）</template>
             </span>
             <button class="btn btn-sm" type="button" :disabled="solana.freshLoading" @click="solana.fetchFreshTokens(true)">
               <RefreshCw :size="13" aria-hidden="true" /> {{ solana.freshLoading ? '取得中…' : '更新' }}
@@ -277,7 +280,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
           </p>
           <div v-else class="grid grid-2">
             <SnipeTokenCard
-              v-for="s in solana.freshTokens"
+              v-for="s in solana.freshDisplay"
               :key="s.token.pairAddress"
               :score="s"
               :selected="method === 'snipe' && selectedPairs.includes(s.token.pairAddress)"
@@ -286,8 +289,8 @@ useHead({ title: 'Solana魔界 | Cryptia' })
           </div>
           <p class="xs faint" style="margin-top: 6px">
             <template v-if="method === 'auto-snipe'">
-              上のリストは監視のプレビューです（選択は不要）。実行中は約 30 秒ごとに監視し、監査通過トークンへ
-              執行直前の最新価格を再取得したうえで自動エントリーします。
+              上のリストは監視プールのおすすめ上位です（選択は不要）。新規発行トークンは約 30 秒ごとの監視で
+              随時プールへ追加され（48 時間で自動失効）、監査通過トークンへ執行直前の最新価格を再取得したうえで自動エントリーします。
             </template>
             <template v-else>
               シグナル（mint 権限・再発行照合等）は取得できた公開情報に基づく選定支援であり、安全性や利益を保証しません。

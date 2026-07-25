@@ -137,6 +137,41 @@ describe('dexscreener: 新規上場発見パイプライン', () => {
     }
     await expect(discoverFreshPairs(fetchJson, 48)).resolves.toEqual([])
   })
+
+  it('profiles が失敗しても boosts 由来のトークンで発見を継続する（原則4）', async () => {
+    const fetchJson = async <T>(url: string): Promise<T> => {
+      if (url === DEX_PROFILES_URL) throw new Error('profiles down')
+      if (url === DEX_BOOSTS_URL) return [{ chainId: 'solana', tokenAddress: MINT_A }] as T
+      return { pairs: [pair()] } as T
+    }
+    const discovered = await discoverFreshPairs(fetchJson, 48)
+    expect(discovered).toHaveLength(1)
+    expect(discovered[0].mint).toBe(MINT_A)
+    // boosts 由来は links なし（SNS シグナルはペア情報のみで評価される）
+    expect(discovered[0].profile?.links).toBeUndefined()
+  })
+
+  it('同一ミントが両フィードにある場合は profiles の links を保持する', async () => {
+    const fetchJson = async <T>(url: string): Promise<T> => {
+      if (url === DEX_PROFILES_URL) {
+        return [
+          { chainId: 'solana', tokenAddress: MINT_A, links: [{ type: 'twitter', url: 'https://x.com/a' }] },
+        ] as T
+      }
+      if (url === DEX_BOOSTS_URL) return [{ chainId: 'solana', tokenAddress: MINT_A }] as T
+      return { pairs: [pair()] } as T
+    }
+    const discovered = await discoverFreshPairs(fetchJson, 48)
+    expect(discovered).toHaveLength(1)
+    expect(discovered[0].profile?.links?.[0]?.type).toBe('twitter')
+  })
+
+  it('発見フィードが両方失敗した場合のみ全体エラーを送出する', async () => {
+    const fetchJson = async <T>(): Promise<T> => {
+      throw new Error('all feeds down')
+    }
+    await expect(discoverFreshPairs(fetchJson, 48)).rejects.toThrow('all feeds down')
+  })
 })
 
 describe('dexscreener: スクリーニングの多ソース収集', () => {

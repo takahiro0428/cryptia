@@ -62,7 +62,7 @@ export function consumeProxyQuota(event: H3Event): void {
 
 /**
  * 上流ホストの呼び出しバジェットを消費する。cost は 1 リクエストで発生する
- * 上流呼び出し回数の見積り（例: fresh パイプラインは最大 11 回）。
+ * 上流呼び出し回数の見積り（例: fresh パイプラインは最大 12 回）。
  * all-or-nothing で判定し、部分消費で他リクエストの枠を圧迫しない。
  */
 export function consumeUpstreamBudget(host: UpstreamHost, cost = 1): boolean {

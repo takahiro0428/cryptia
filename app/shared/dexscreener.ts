@@ -66,10 +66,10 @@ export function isValidAddress(addr: string): boolean {
   return /^[1-9A-HJ-NP-Za-km-z]{20,60}$/.test(addr)
 }
 
-/** token-profiles から辿る最大トークン数（tokens API は 30 件/回のため 2 バッチ分） */
+/** 発見フィード（profiles + boosts）から辿る最大トークン数（tokens API は 30 件/回のため 2 バッチ分） */
 export const FRESH_MAX_PROFILE_TOKENS = 60
-/** 新規上場リストとして返す上位件数 */
-export const FRESH_MAX_RESULTS = 12
+/** 新規上場リストとして返す上位件数（クライアント側でローリングプールへ蓄積される） */
+export const FRESH_MAX_RESULTS = 25
 
 export interface FreshDiscovery {
   mint: string
@@ -157,21 +157,36 @@ export async function discoverScreeningPairs(
 
 /**
  * 新規上場トークンの発見パイプライン（サーバープロキシ・クライアント直接取得の共通処理）。
- * token-profiles（掲載直後のトークン）→ ミントごとに最も流動性の高いペアを解決 →
- * maxAgeHours 以内の新規ペアのみ・新しい順に上位を返す。
+ * token-profiles（掲載直後）+ token-boosts（宣伝中 = 発行直後が多い）→
+ * ミントごとに最も流動性の高いペアを解決 → maxAgeHours 以内の新規ペアのみ・新しい順に上位を返す。
  * fetchJson を注入することで、実行環境ごとの取得手段（プロキシ/直接）を差し替える。
  */
 export async function discoverFreshPairs(
   fetchJson: <T>(url: string) => Promise<T>,
   maxAgeHours: number,
 ): Promise<FreshDiscovery[]> {
-  // 1) 掲載直後のトークンプロファイル（Solana のみ）
-  const profiles = await fetchJson<TokenProfile[]>(DEX_PROFILES_URL)
+  // 1) 発見フィード: profiles（links つき）を優先し、boosts で補完（Solana のみ）
+  const [profilesResult, boostsResult] = await Promise.allSettled([
+    fetchJson<TokenProfile[]>(DEX_PROFILES_URL),
+    fetchJson<TokenBoost[]>(DEX_BOOSTS_URL),
+  ])
+  // 両フィードとも失敗した場合のみ全体エラー（片側の失敗は残りで継続: 原則4）
+  if (profilesResult.status === 'rejected' && boostsResult.status === 'rejected') {
+    throw profilesResult.reason
+  }
   const profileByMint = new Map<string, TokenProfile>()
-  for (const p of Array.isArray(profiles) ? profiles : []) {
-    if (p.chainId !== 'solana' || !p.tokenAddress || !isValidAddress(p.tokenAddress)) continue
-    if (!profileByMint.has(p.tokenAddress)) profileByMint.set(p.tokenAddress, p)
-    if (profileByMint.size >= FRESH_MAX_PROFILE_TOKENS) break
+  const addMint = (chainId?: string, tokenAddress?: string, profile?: TokenProfile) => {
+    if (chainId !== 'solana' || !tokenAddress || !isValidAddress(tokenAddress)) return
+    if (profileByMint.size >= FRESH_MAX_PROFILE_TOKENS && !profileByMint.has(tokenAddress)) return
+    if (!profileByMint.has(tokenAddress) || profile) {
+      profileByMint.set(tokenAddress, profile ?? profileByMint.get(tokenAddress) ?? {})
+    }
+  }
+  if (profilesResult.status === 'fulfilled' && Array.isArray(profilesResult.value)) {
+    for (const p of profilesResult.value) addMint(p.chainId, p.tokenAddress, p)
+  }
+  if (boostsResult.status === 'fulfilled' && Array.isArray(boostsResult.value)) {
+    for (const b of boostsResult.value) addMint(b.chainId, b.tokenAddress)
   }
   const mints = [...profileByMint.keys()]
 

@@ -6,7 +6,12 @@ import {
   toToken,
   type DexPair,
 } from '~/shared/dexscreener'
-import { countDuplicates, SNIPE_MAX_AGE_HOURS, type FreshTokenSignals } from '~/shared/snipeScoring'
+import {
+  AUTO_SNIPE_MIN_LIQUIDITY_USD,
+  countDuplicates,
+  SNIPE_MAX_AGE_HOURS,
+  type FreshTokenSignals,
+} from '~/shared/snipeScoring'
 import type { SolanaToken } from '~/shared/types'
 import { cachedProxyJson, fetchUpstreamJson } from '../../utils/dexProxy'
 
@@ -14,8 +19,8 @@ import { cachedProxyJson, fetchUpstreamJson } from '../../utils/dexProxy'
 const TTL_MS = 90_000
 /** 再発行照合の検索回数上限（上流レートリミット配慮） */
 const MAX_DUP_SEARCHES = 8
-/** パイプライン最大 11 回の上流呼び出し見積り（profiles 1 + tokens 2 + 検索 8） */
-const UPSTREAM_COST = 11
+/** パイプライン最大 12 回の上流呼び出し見積り（profiles 1 + boosts 1 + tokens 2 + 検索 8） */
+const UPSTREAM_COST = 12
 /**
  * パイプライン全体のデッドライン。クライアントのタイムアウト（25s）内に必ず応答するため、
  * 超過が見込まれる段階（RPC・再発行照合）はスキップしシグナル null の部分結果で返す（AUDIT-P9-5）
@@ -98,13 +103,20 @@ export default defineEventHandler(async (event) => {
       ? await fetchMintAuthorities(discovered.map((d) => d.mint))
       : new Map<string, { mintRenounced: boolean; freezeAbsent: boolean }>()
 
-    // 同名・同シンボル再発行の照合（検索回数は上限内で。失敗・未実施・デッドライン超過は null）
+    // 同名・同シンボル再発行の照合（検索回数は上限内で。失敗・未実施・デッドライン超過は null）。
+    // 返却上限（25 件）に対し照合枠は 8 のため、監査を通過し得るトークン
+    // （流動性が監査下限以上）を優先して照合枠を割り当てる（null 素通りの希釈対策）
     const dupBySymbol = new Map<
       string,
       { baseSymbol: string; baseName: string; baseAddress: string; ageHours: number }[]
     >()
+    const prioritized = [...discovered].sort((a, b) => {
+      const aAudit = a.token.liquidityUsd >= AUTO_SNIPE_MIN_LIQUIDITY_USD ? 0 : 1
+      const bAudit = b.token.liquidityUsd >= AUTO_SNIPE_MIN_LIQUIDITY_USD ? 0 : 1
+      return aAudit - bAudit || a.token.ageHours - b.token.ageHours
+    })
     const symbols = withinDeadline()
-      ? [...new Set(discovered.map((d) => d.token.baseSymbol.toLowerCase()))].slice(
+      ? [...new Set(prioritized.map((d) => d.token.baseSymbol.toLowerCase()))].slice(
           0,
           MAX_DUP_SEARCHES,
         )
