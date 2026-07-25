@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildMoonbagLadder,
   countDuplicates,
   mergeFreshPool,
+  MOONBAG_DEFAULT_STOP_LOSS_PCT,
+  normalizeMoonbagStopLoss,
   passesMinimalAudit,
   scoreFreshToken,
   SNIPE_LADDER_RULES,
@@ -325,5 +328,47 @@ describe('snipeScoring: スナイプラダー（利益確保型）', () => {
     const first = checkLadder(1.0, 1.6, SNIPE_LADDER_RULES, [])
     const triggered = first.map((f) => f.index)
     expect(checkLadder(1.0, 1.6, SNIPE_LADDER_RULES, triggered)).toHaveLength(0)
+  })
+})
+
+describe('snipeScoring: ムーンバッグラダー', () => {
+  it('損切りありは [利確 +100%/70%, 損切り/全量] の 2 段で構築される', () => {
+    expect(buildMoonbagLadder(-50)).toEqual([
+      { triggerPct: 100, sellRatio: 0.7 },
+      { triggerPct: -50, sellRatio: 1 },
+    ])
+  })
+
+  it('損切りなし（null）は利確 1 段のみ（下落側の出口を持たない = 完全放置）', () => {
+    const rules = buildMoonbagLadder(null)
+    expect(rules).toEqual([{ triggerPct: 100, sellRatio: 0.7 }])
+    // -90% でも発動するルールがない
+    expect(checkLadder(1.0, 0.1, rules, [])).toHaveLength(0)
+  })
+
+  it('+100% で 70% 売却 = 元本の 1.4 倍回収（元本+40% 確定）', () => {
+    const rules = buildMoonbagLadder(-50)
+    const fired = checkLadder(1.0, 2.0, rules, [])
+    expect(fired).toHaveLength(1)
+    expect(fired[0].rule.sellRatio).toBe(0.7)
+    // 検算: 売却額 = 0.7 × 2.0 = 1.4（対エントリー時投入額）
+    expect((1 + fired[0].rule.triggerPct / 100) * fired[0].rule.sellRatio).toBeCloseTo(1.4, 10)
+  })
+
+  it('利確と損切りは同一価格で同時発動しない（相互排他）', () => {
+    const rules = buildMoonbagLadder(-50)
+    for (const price of [0.4, 0.5, 1.0, 1.99, 2.0, 3.0]) {
+      expect(checkLadder(1.0, price, rules, []).length).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('normalizeMoonbagStopLoss: null は明示選択として保持、不正値は既定へ、範囲はクランプ', () => {
+    expect(normalizeMoonbagStopLoss(null)).toBeNull()
+    expect(normalizeMoonbagStopLoss(undefined)).toBe(MOONBAG_DEFAULT_STOP_LOSS_PCT)
+    expect(normalizeMoonbagStopLoss(Number.NaN)).toBe(MOONBAG_DEFAULT_STOP_LOSS_PCT)
+    expect(normalizeMoonbagStopLoss(30)).toBe(MOONBAG_DEFAULT_STOP_LOSS_PCT) // 正値は不正
+    expect(normalizeMoonbagStopLoss(-500)).toBe(-90)
+    expect(normalizeMoonbagStopLoss(-5)).toBe(-10)
+    expect(normalizeMoonbagStopLoss(-30)).toBe(-30)
   })
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { TriangleAlert } from '@lucide/vue'
+import { Moon, TriangleAlert } from '@lucide/vue'
 import { fmtAgo, fmtPct, fmtQty, fmtTokenAge, fmtUsd } from '~/shared/format'
 import { SNIPE_VERDICT_LABELS } from '~/shared/snipeScoring'
 import { positionOf } from '~/shared/tradeEngine'
@@ -45,9 +45,12 @@ const VERDICT = SNIPE_VERDICT_LABELS
  */
 const isAiMethod = computed(() => session.value?.method === 'ai')
 
+/** ムーンバッグ化済み = +100% 利確発動済みで、以後は売却ルールなしの恒久保持 */
+const isMoonbag = computed(() => meta.value?.moonbagAt !== undefined)
+
 /** 未発動のラダーライン（エントリー価格基準の目標価格つき） */
 const ladderLines = computed(() => {
-  if (!meta.value || !session.value || isAiMethod.value) return []
+  if (!meta.value || !session.value || isAiMethod.value || isMoonbag.value) return []
   return session.value.ladderRules
     .map((rule, index) => ({
       rule,
@@ -99,6 +102,15 @@ const ladderLines = computed(() => {
       現在この銘柄の市場情報を取得できていません（表示は最終取得値・取得単価ベース）
     </p>
 
+    <!-- ムーンバッグ化済み: 売却ルールなしの恒久保持であることを明示 -->
+    <div v-if="isMoonbag && meta" class="row xs moonbag-note">
+      <Moon :size="12" aria-hidden="true" />
+      <span>
+        ムーンバッグ（+100% 利確済み・元本回収済み）。残数量は売却ルールなしで保持中
+        <template v-if="meta.moonbagAt">（保持開始: {{ fmtAgo(meta.moonbagAt) }}）</template>
+      </span>
+    </div>
+
     <!-- ラダーの残りライン（次の利確・損切り価格を可視化） -->
     <div v-if="ladderLines.length > 0" class="row xs">
       <span class="faint">残りライン:</span>
@@ -148,4 +160,6 @@ const ladderLines = computed(() => {
   border: 1px solid var(--border);
   font-size: 0.68rem;
 }
+.moonbag-note { color: var(--accent); align-items: flex-start; }
+.moonbag-note svg { flex-shrink: 0; margin-top: 2px; }
 </style>

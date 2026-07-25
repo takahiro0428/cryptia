@@ -12,8 +12,11 @@ import {
 import { ERROR_CODES, formatError } from '~/shared/errors'
 import { mockSolanaTokens } from '~/shared/mockData'
 import {
+  buildMoonbagLadder,
   FRESH_DISPLAY_MAX,
   mergeFreshPool,
+  MOONBAG_DEFAULT_STOP_LOSS_PCT,
+  normalizeMoonbagStopLoss,
   passesMinimalAudit,
   scoreFreshToken,
   SNIPE_LADDER_RULES,
@@ -75,13 +78,23 @@ const ARCHIVE_ORDERS_MAX = 100
 /** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
 const ARCHIVE_ORDERS_KEEP = 10
 
-export type DegenMethod = 'ai' | 'ladder' | 'snipe' | 'auto-snipe'
+export type DegenMethod = 'ai' | 'ladder' | 'snipe' | 'auto-snipe' | 'moonbag'
 
 export const DEGEN_METHOD_LABELS: Record<DegenMethod, string> = {
   ladder: 'ラダー',
   ai: 'AI 取引',
   snipe: 'スナイプ',
   'auto-snipe': '自動スナイプ',
+  moonbag: 'ムーンバッグ',
+}
+
+/**
+ * 常時監視エントリー（自動スナイプ系パイプライン）を使う手法か。
+ * true の手法はトークン選択不要 — 新規上場プールの監査通過トークンへ随時エントリーする。
+ * 出口だけが異なる: auto-snipe = 利益確保型ラダー / moonbag = +100% で 70% 売却 → 残り恒久保持
+ */
+export function usesAutoPipeline(m: DegenMethod): boolean {
+  return m === 'auto-snipe' || m === 'moonbag'
 }
 
 /** 自動スナイプ（常時監視）の設定 */
@@ -113,6 +126,19 @@ const AUTO_SNIPE_MIN_ENTRY_USD = 10
 interface PositionMeta {
   entryPriceUsd: number
   triggered: number[]
+  /**
+   * ムーンバッグ化した時刻（+100% 利確発動でセット）。
+   * セット後は損切り含む全ルールが無効（完全放置）で、
+   * 同時ポジション数にも数えない（新規エントリー枠を塞がない）
+   */
+  moonbagAt?: number
+  /**
+   * 保有トークンのミント（baseAddress）。エントリー履歴（enteredMints）の
+   * 200 件間引きから独立して「現在保有中のミント」を照合できるようにする
+   * （長期運用で履歴から消えた保有中トークンの別プールへの再エントリー防止:
+   * ISSUE-P9-M14。旧データは未設定 = tokenOf からのフォールバック解決）
+   */
+  mint?: string
 }
 
 /** 魔界トレードのセッション（複数同時実行可能: F-05/F-06） */
@@ -131,6 +157,12 @@ export interface DegenSession {
   enteredMints: string[]
   /** AI 判断がレートリミット等でロジックへ縮退した最終時刻（UI で明示する） */
   aiDegradedAt?: number
+  /**
+   * ムーンバッグ手法の損切りライン（%・負値）。null = 損切りなし（完全放置）。
+   * +100% 到達前のみ有効（到達後はムーンバッグ化して全ルール無効）。
+   * moonbag 以外の手法では undefined
+   */
+  moonbagStopLossPct?: number | null
 }
 
 interface DegenArchive {
@@ -168,6 +200,14 @@ let sessionSeq = 0
 function newSessionId(): string {
   return `degen-${Date.now().toString(36)}-${++sessionSeq}-${Math.random().toString(36).slice(2, 6)}`
 }
+
+/**
+ * ムーンバッグの価格更新ローテーション位置（表示専用のためメモリのみ）。
+ * ムーンバッグは売却ルールなし = 価格が執行に影響しないため優先度を下げ、
+ * pairs API の 30 件枠に収まらない分は呼び出しごとに 1 つずつ窓をずらして
+ * 順繰りに更新する（全ムーンバッグの評価額がいずれ更新される）
+ */
+let moonbagPriceRotation = 0
 
 /**
  * Solana 魔界トレードストア（UC-5 / F-05, F-06）。
@@ -250,6 +290,21 @@ export const useSolanaStore = defineStore('solana', {
         return summarize(session.portfolio, this.priceMap)
       }
     },
+    /** ムーンバッグ保有の集計（件数・評価額）。moonbag 手法以外は常に 0 件 */
+    moonbagStatsOf() {
+      return (id: string): { count: number; valueUsd: number } => {
+        const session = this.sessionById(id)
+        if (!session || session.method !== 'moonbag') return { count: 0, valueUsd: 0 }
+        let count = 0
+        let valueUsd = 0
+        for (const p of session.portfolio.positions) {
+          if (!session.positionMeta[p.assetId]?.moonbagAt) continue
+          count++
+          valueUsd += p.quantity * (this.tokenOf(p.assetId)?.priceUsd ?? p.avgCostUsd)
+        }
+        return { count, valueUsd }
+      }
+    },
   },
   actions: {
     async restoreState() {
@@ -259,11 +314,22 @@ export const useSolanaStore = defineStore('solana', {
         this.archives = saved.archives ?? []
         this.sessionCounter = saved.sessionCounter ?? 0
         if (saved.sessions) {
-          this.sessions = saved.sessions.map((s) => ({
-            ...s,
+          this.sessions = saved.sessions.map((s) => {
             // 復元時も開始時と同じクランプを通す（別バージョン・改変データへの防御）
-            autoSnipe: normalizeAutoSnipe(s.autoSnipe),
-          }))
+            const moonbagStopLossPct =
+              s.method === 'moonbag' ? normalizeMoonbagStopLoss(s.moonbagStopLossPct) : undefined
+            return {
+              ...s,
+              autoSnipe: normalizeAutoSnipe(s.autoSnipe),
+              moonbagStopLossPct,
+              // moonbag はルール構成が設定から一意に決まるため再構築し、
+              // 設定（moonbagStopLossPct）と実行ルールの乖離を防ぐ
+              ladderRules:
+                s.method === 'moonbag'
+                  ? buildMoonbagLadder(moonbagStopLossPct ?? null)
+                  : s.ladderRules,
+            }
+          })
         } else if (saved.portfolio) {
           // 旧形式（単一セッション）からの移行（原則7: 下位互換）
           this.sessions = [
@@ -350,6 +416,38 @@ export const useSolanaStore = defineStore('solana', {
       }
       return out
     },
+    /**
+     * 価格更新の対象リスト（優先順・30 件枠へ切る前の全体）。
+     * アクティブな保有（出口ルールが生きている = 価格が執行に直結）を最優先し、
+     * ムーンバッグ（売却ルールなし = 表示専用）→ その他の監視ペアの順で詰める。
+     * 分類は**全セッション横断**で行う — 同一ペアを複数セッションが保有し得るため、
+     * 1 つでもアクティブに保有するセッションがあればアクティブ扱いにする
+     * （ムーンバッグセッションの評価順が先でも執行用の価格鮮度を劣化させない: ISSUE-P9-M15）。
+     * ムーンバッグは恒久保持で件数が増え続けるため、枠に収まらない分は
+     * 呼び出しごとのローテーションで順繰りに更新する。
+     */
+    _priceRefreshTargets(): string[] {
+      const activeSet = new Set<string>()
+      const moonbagSet = new Set<string>()
+      for (const session of this.sessions) {
+        for (const p of session.portfolio.positions) {
+          if (session.positionMeta[p.assetId]?.moonbagAt) moonbagSet.add(p.assetId)
+          else activeSet.add(p.assetId)
+        }
+      }
+      const active = [...activeSet]
+      const moonbags = [...moonbagSet].filter((addr) => !activeSet.has(addr))
+      if (moonbags.length > 1) {
+        const offset = moonbagPriceRotation % moonbags.length
+        moonbagPriceRotation = (moonbagPriceRotation + 1) % 1_000_000
+        moonbags.splice(0, moonbags.length, ...moonbags.slice(offset), ...moonbags.slice(0, offset))
+      }
+      const targets = [...active, ...moonbags]
+      for (const addr of this._allWatchedPairs()) {
+        if (!targets.includes(addr)) targets.push(addr)
+      }
+      return targets.filter(isValidAddress)
+    },
     async fetchTokens(force = false) {
       this.loading = this.tokens.length === 0 || (force && this.usingMockData)
       if (force) this._dexVia = 'direct'
@@ -423,17 +521,7 @@ export const useSolanaStore = defineStore('solana', {
       if (this._pricesBusy || this.usingMockData) return
       // セッションなしの間は無駄な取得をしない（クォータ浪費防止）
       if (this.sessions.length === 0) return
-      // 全セッションの保有ポジション → 監視ペアの順で 30 件枠を割り当てる
-      const targets: string[] = []
-      for (const session of this.sessions) {
-        for (const p of session.portfolio.positions) {
-          if (!targets.includes(p.assetId)) targets.push(p.assetId)
-        }
-      }
-      for (const addr of this._allWatchedPairs()) {
-        if (!targets.includes(addr)) targets.push(addr)
-      }
-      const addrs = targets.filter(isValidAddress).slice(0, 30)
+      const addrs = this._priceRefreshTargets().slice(0, 30)
       if (addrs.length === 0) return
       this._pricesBusy = true
       try {
@@ -526,7 +614,8 @@ export const useSolanaStore = defineStore('solana', {
     /**
      * 新しいセッションを開始する（既存セッションは動かしたまま追加できる）。
      * ladder/snipe は即時等分エントリー、ai はティックごとに判断、
-     * auto-snipe は選択不要 — 常時監視で監査通過トークンへ随時エントリーする。
+     * auto-snipe / moonbag は選択不要 — 常時監視で監査通過トークンへ随時エントリーする
+     * （moonbag の出口は +100% で 70% 売却 → 残りは売却ルールなしで恒久保持）。
      */
     async start(
       allocatedUsd: number,
@@ -534,13 +623,15 @@ export const useSolanaStore = defineStore('solana', {
       method: DegenMethod,
       autoConfig?: Partial<AutoSnipeConfig>,
       name = '',
+      // 引数省略時は推奨の -50%。損切りなし（完全放置）は null の明示指定のみ
+      moonbagStopLossPct: number | null = MOONBAG_DEFAULT_STOP_LOSS_PCT,
     ) {
       const ui = useUiStore()
       if (this.sessions.length >= MAX_DEGEN_SESSIONS) {
         ui.notify(`同時に実行できるセッションは ${MAX_DEGEN_SESSIONS} 件までです。不要なセッションを終了してください`, 'warn')
         return
       }
-      if (method !== 'auto-snipe' && pairAddresses.length === 0) {
+      if (!usesAutoPipeline(method) && pairAddresses.length === 0) {
         ui.notify('取引対象のトークンを選択してください', 'warn')
         return
       }
@@ -564,6 +655,8 @@ export const useSolanaStore = defineStore('solana', {
         }
       }
       try {
+        const normalizedStopLoss =
+          method === 'moonbag' ? normalizeMoonbagStopLoss(moonbagStopLossPct) : undefined
         const session: DegenSession = {
           id: newSessionId(),
           name:
@@ -574,14 +667,17 @@ export const useSolanaStore = defineStore('solana', {
           running: true,
           method,
           ladderRules:
-            method === 'snipe' || method === 'auto-snipe'
-              ? [...SNIPE_LADDER_RULES]
-              : [...DEFAULT_LADDER_RULES],
+            method === 'moonbag'
+              ? buildMoonbagLadder(normalizedStopLoss ?? null)
+              : method === 'snipe' || method === 'auto-snipe'
+                ? [...SNIPE_LADDER_RULES]
+                : [...DEFAULT_LADDER_RULES],
           watchedPairs: [...pairAddresses],
           positionMeta: {},
           autoSnipe: normalizeAutoSnipe(autoConfig),
           enteredPairs: [],
           enteredMints: [],
+          moonbagStopLossPct: normalizedStopLoss,
         }
         this.sessions.push(session)
 
@@ -609,7 +705,11 @@ export const useSolanaStore = defineStore('solana', {
               strategy: strategyName,
             })
             target.portfolio = result.portfolio
-            target.positionMeta[addr] = { entryPriceUsd: token.priceUsd, triggered: [] }
+            target.positionMeta[addr] = {
+              entryPriceUsd: token.priceUsd,
+              triggered: [],
+              mint: token.baseAddress,
+            }
           }
         }
 
@@ -681,22 +781,48 @@ export const useSolanaStore = defineStore('solana', {
       this._persist()
       useUiStore().notify(`「${session.name}」を終了し、結果を過去セッションに保存しました`)
     },
+    /** 現在保有中（ムーンバッグ含む）のミント集合。旧データは tokenOf からフォールバック解決 */
+    _heldMints(session: DegenSession): Set<string> {
+      const out = new Set<string>()
+      for (const p of session.portfolio.positions) {
+        const mint = session.positionMeta[p.assetId]?.mint ?? this.tokenOf(p.assetId)?.baseAddress
+        if (mint) out.add(mint)
+      }
+      return out
+    },
     /**
      * 自動スナイプ: 全量決済済みペアを監視対象から外す。
      * pairs API の 30 件制約の枠を現役ポジションのために温存する
      * （再エントリーの禁止は enteredPairs/enteredMints が別途担うため、剪定しても安全）。
-     * 照合対象（新規上場 48h 窓）に現れ得ない古いエントリー履歴も上限で間引く。
+     * 照合対象（新規上場 48h 窓）に現れ得ない古いエントリー履歴も上限で間引くが、
+     * **保有中（ムーンバッグ含む）の分は保護する** — 恒久保持のムーンバッグセッションでは
+     * 累計 200 件超過が現実的で、保有中トークンが履歴から消えると同一ミントの別プールへ
+     * 再エントリーできてしまうため（ISSUE-P9-M14）。
      */
     _pruneClosedAutoPairs(session: DegenSession) {
-      if (session.method !== 'auto-snipe') return
+      if (!usesAutoPipeline(session.method)) return
       session.watchedPairs = session.watchedPairs.filter(
         (addr) => positionOf(session.portfolio, addr) !== undefined,
       )
       for (const addr of Object.keys(session.positionMeta)) {
         if (!session.watchedPairs.includes(addr)) delete session.positionMeta[addr]
       }
-      if (session.enteredPairs.length > 200) session.enteredPairs = session.enteredPairs.slice(-200)
-      if (session.enteredMints.length > 200) session.enteredMints = session.enteredMints.slice(-200)
+      // 上限間引き（保有中の分は間引かない。保護分が上限を超える場合は保護のみ残す）
+      const trimProtected = (list: string[], isProtected: (v: string) => boolean, cap: number) => {
+        if (list.length <= cap) return list
+        const room = cap - list.filter(isProtected).length
+        // slice(-0) は全件残しになるため、空き枠なしは明示的に空集合（ISSUE-P9-L36）
+        const keepOthers =
+          room > 0 ? new Set(list.filter((v) => !isProtected(v)).slice(-room)) : new Set<string>()
+        return list.filter((v) => isProtected(v) || keepOthers.has(v))
+      }
+      const heldMints = this._heldMints(session)
+      session.enteredMints = trimProtected(session.enteredMints, (m) => heldMints.has(m), 200)
+      session.enteredPairs = trimProtected(
+        session.enteredPairs,
+        (addr) => positionOf(session.portfolio, addr) !== undefined,
+        200,
+      )
     },
     /**
      * 自動スナイプ（常時監視）の新規エントリー処理。
@@ -712,7 +838,13 @@ export const useSolanaStore = defineStore('solana', {
       if (this.usingMockData) return
       if (Date.now() - this.freshFetchedAt > AUTO_SNIPE_MAX_DATA_AGE_MS) return
 
-      const openPositions = session.portfolio.positions.length
+      // ムーンバッグ化した保有（売却ルールなし・利確済み）は同時ポジション数に数えない —
+      // 恒久保持が新規エントリー枠を塞ぐと監視型戦略として機能停止するため（auto-snipe では常に全件が対象）
+      // ※ 閉包へは const 参照を渡す（let の session は strict narrowing が効かない）
+      const positionMeta = session.positionMeta
+      const openPositions = session.portfolio.positions.filter(
+        (p) => !positionMeta[p.assetId]?.moonbagAt,
+      ).length
       const slots = Math.max(0, session.autoSnipe.maxPositions - openPositions)
       if (slots === 0) return
       const perSlot = session.portfolio.initialUsd / session.autoSnipe.maxPositions
@@ -722,6 +854,7 @@ export const useSolanaStore = defineStore('solana', {
       //    **発見フィードで 5 分以内に確認できたエントリーのみ**を執行対象にする
       //    （古い流動性・判定で監査を通過してエントリーする経路の遮断）
       const now = Date.now()
+      const heldMints = this._heldMints(session)
       const candidates: SnipeScore[] = []
       for (const score of this.freshTokens) {
         if (candidates.length >= slots) break
@@ -732,6 +865,8 @@ export const useSolanaStore = defineStore('solana', {
         if (session.enteredMints.includes(score.token.baseAddress)) continue
         if (session.enteredPairs.includes(addr)) continue
         if (positionOf(session.portfolio, addr)) continue
+        // 保有中（ムーンバッグ含む）ミントの別プールにも入らない（履歴間引き後の防衛: ISSUE-P9-M14）
+        if (heldMints.has(score.token.baseAddress)) continue
         candidates.push(score)
       }
       if (candidates.length === 0) return
@@ -767,16 +902,21 @@ export const useSolanaStore = defineStore('solana', {
         if (notionalUsd < AUTO_SNIPE_MIN_ENTRY_USD) break
         if (score.token.priceUsd <= 0) continue
         try {
+          const isMoonbag = session.method === 'moonbag'
           const result = executeOrder(session.portfolio, {
             assetId: addr,
             side: 'buy',
             notionalUsd,
             priceUsd: score.token.priceUsd,
-            reason: `自動スナイプ: 監査通過（スコア ${score.total}・${score.verdict === 'candidate' ? '候補' : '要注意'}）の新規上場 ${score.token.baseSymbol} へエントリー`,
-            strategy: '自動スナイプ',
+            reason: `${isMoonbag ? 'ムーンバッグ戦略' : '自動スナイプ'}: 監査通過（スコア ${score.total}・${score.verdict === 'candidate' ? '候補' : '要注意'}）の新規上場 ${score.token.baseSymbol} へエントリー`,
+            strategy: isMoonbag ? 'ムーンバッグ' : '自動スナイプ',
           })
           session.portfolio = result.portfolio
-          session.positionMeta[addr] = { entryPriceUsd: score.token.priceUsd, triggered: [] }
+          session.positionMeta[addr] = {
+            entryPriceUsd: score.token.priceUsd,
+            triggered: [],
+            mint: score.token.baseAddress,
+          }
           session.enteredPairs.push(addr)
           session.enteredMints.push(score.token.baseAddress)
           if (!session.watchedPairs.includes(addr)) session.watchedPairs.push(addr)
@@ -792,7 +932,7 @@ export const useSolanaStore = defineStore('solana', {
       // 自動スナイプ: 監視 → 監査 → 随時エントリー（出口は下のラダー共通処理）
       const initial = this.sessionById(sessionId)
       if (!initial || !initial.running) return
-      if (initial.method === 'auto-snipe') {
+      if (usesAutoPipeline(initial.method)) {
         await this._autoSnipeEntries(sessionId)
       }
       const session = this.sessionById(sessionId)
@@ -821,15 +961,25 @@ export const useSolanaStore = defineStore('solana', {
               ? '新規上場スナイプ'
               : current.method === 'auto-snipe'
                 ? '自動スナイプ'
-                : 'ラダーロジック'
+                : current.method === 'moonbag'
+                  ? 'ムーンバッグ'
+                  : 'ラダーロジック'
           const fired = checkLadder(meta.entryPriceUsd, token.priceUsd, current.ladderRules, meta.triggered)
           for (const { index, rule } of fired) {
             const position = positionOf(current.portfolio, addr)
             if (!position || position.quantity <= 0) break
             // 数量指定で発注（notional 逆算の誤差で全量損切りが失敗しない: ISSUE-2）
             const sellQty = position.quantity * rule.sellRatio
+            const isMoonbagTp = current.method === 'moonbag' && rule.triggerPct >= 0
             if (sellQty * token.priceUsd < 0.01) {
               meta.triggered.push(index)
+              // dust でも TP 発動はムーンバッグ化する（実行上は到達不能だが、TP だけ消費されて
+              // 損切りが生き残る不整合を防ぐ防御。エントリー最低 $10 → TP 時の売却額 ≥ $14）
+              if (isMoonbagTp) {
+                meta.moonbagAt = Date.now()
+                meta.triggered = current.ladderRules.map((_, i) => i)
+                break
+              }
               continue
             }
             try {
@@ -838,14 +988,21 @@ export const useSolanaStore = defineStore('solana', {
                 side: 'sell',
                 quantity: sellQty,
                 priceUsd: token.priceUsd,
-                reason:
-                  rule.triggerPct >= 0
+                reason: isMoonbagTp
+                  ? `ムーンバッグ利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% を売却（元本+${Math.round(((1 + rule.triggerPct / 100) * rule.sellRatio - 1) * 100)}% 確定・残りは売却ルールなしで保持）`
+                  : rule.triggerPct >= 0
                     ? `ラダー利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`
                     : `ラダー損切り: ${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`,
                 strategy: strategyName,
               })
               current.portfolio = result.portfolio
               meta.triggered.push(index)
+              if (isMoonbagTp) {
+                // ムーンバッグ化: 利確後は損切り含む全ルールを無効化し、残数量を恒久保持する
+                meta.moonbagAt = Date.now()
+                meta.triggered = current.ladderRules.map((_, i) => i)
+                break
+              }
             } catch (err) {
               const { code, message } = formatError(err)
               console.warn(`[${code}] ${message}`)
