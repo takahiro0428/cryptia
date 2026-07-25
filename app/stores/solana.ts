@@ -21,7 +21,7 @@ import {
   type FreshTokenSignals,
   type SnipeScore,
 } from '~/shared/snipeScoring'
-import { fitArchivesToBudget, utf8Bytes } from '~/shared/persistBudget'
+import { fitArchivesToBudget, fitSessionsToBudget, utf8Bytes } from '~/shared/persistBudget'
 import { isTradable, rankTokens } from '~/shared/solanaScoring'
 import {
   applyDecision,
@@ -55,6 +55,21 @@ const FRESH_TTL_MS = 2 * 60 * 1000
 export const DEGEN_TICK_MS = 30_000
 /** 保有中の表示価格更新間隔（一時停止中も損益をリアルタイム表示する） */
 export const DISPLAY_REFRESH_MS = 10_000
+/** 同時に持てるセッション数の上限（価格取得 30 件枠・UI の複雑性の抑制） */
+export const MAX_DEGEN_SESSIONS = 3
+/**
+ * AI 手法のセッション×ペアの合計上限。30s ティック = 2 回/分のため
+ * 6 ペアで最大 12 回/分。AI API のレートリミット（uid 単位 40/分）は
+ * デモトレードの AI エンジン（最大 24 回/分）・市場インサイト・実トレードの
+ * 手動 AI 判断と**共有**のため、自動枠の合算 36 回/分 + 手動系の余裕
+ * 4 回/分 で 40/分内に収める（ISSUE-P9-M13）
+ */
+export const MAX_AI_PAIRS_TOTAL = 6
+/**
+ * 1 セッションの選択ペア上限。3 セッション × 10 = 30 で価格取得の
+ * 30 件バッチ制約に収まる（超過時は後方セッションの価格が凍結する: ISSUE-P9-L28）
+ */
+export const MAX_PAIRS_PER_SESSION = 10
 /** アーカイブ1件に保存する約定履歴の上限（Firestore ドキュメント容量保護） */
 const ARCHIVE_ORDERS_MAX = 100
 /** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
@@ -100,6 +115,24 @@ interface PositionMeta {
   triggered: number[]
 }
 
+/** 魔界トレードのセッション（複数同時実行可能: F-05/F-06） */
+export interface DegenSession {
+  id: string
+  name: string
+  createdAt: number
+  portfolio: Portfolio
+  running: boolean
+  method: DegenMethod
+  ladderRules: LadderRule[]
+  watchedPairs: string[]
+  positionMeta: Record<string, PositionMeta>
+  autoSnipe: AutoSnipeConfig
+  enteredPairs: string[]
+  enteredMints: string[]
+  /** AI 判断がレートリミット等でロジックへ縮退した最終時刻（UI で明示する） */
+  aiDegradedAt?: number
+}
+
 interface DegenArchive {
   endedAt: number
   summary: PortfolioSummary
@@ -109,26 +142,38 @@ interface DegenArchive {
   orders?: Order[]
   /** assetId（ペアアドレス）→ シンボルの対応（履歴表示用） */
   symbols?: Record<string, string>
+  /** セッション名（複数セッション対応後の追加フィールド） */
+  name?: string
 }
 
+/** 旧形式（単一セッション）を含む永続化ペイロード */
 interface PersistedDegen {
-  portfolio: Portfolio | null
-  running: boolean
-  method: DegenMethod
-  ladderRules: LadderRule[]
-  watchedPairs: string[]
-  positionMeta: Record<string, PositionMeta>
+  sessions?: DegenSession[]
+  /** セッション既定名の通し番号（途中終了で番号が重複しないよう永続化） */
+  sessionCounter?: number
   archives: DegenArchive[]
-  /** 自動スナイプの設定・エントリー済みペア/ミント（追加フィールド: 旧データは既定値で復元） */
+  /** 旧形式（v1: 単一セッション）。移行用に残す（原則7） */
+  portfolio?: Portfolio | null
+  running?: boolean
+  method?: DegenMethod
+  ladderRules?: LadderRule[]
+  watchedPairs?: string[]
+  positionMeta?: Record<string, PositionMeta>
   autoSnipe?: AutoSnipeConfig
   enteredPairs?: string[]
   enteredMints?: string[]
 }
 
+let sessionSeq = 0
+function newSessionId(): string {
+  return `degen-${Date.now().toString(36)}-${++sessionSeq}-${Math.random().toString(36).slice(2, 6)}`
+}
+
 /**
  * Solana 魔界トレードストア（UC-5 / F-05, F-06）。
- * - DexScreener で新興トークンをスクリーニングし、スコアリングで選定支援
- * - 取引手法: AI 取引（Vertex/ロジック） / ラダーロジック / 新規上場スナイプ
+ * - **複数セッションを同時実行**できる（それぞれ独立した資金・手法・実行状態）
+ * - 市場データ（スクリーニング・監視プール・価格）は全セッションで共有し、
+ *   ティックはストアで一本化して実行中の全セッションを順に処理する（API 負荷は一定）
  * - 取引はデモ資金で実行（実資金は /trade/live のウォレット接続経由のみ）
  * - DexScreener へ直接到達できない環境では /api/solana/* プロキシへ自動フォールバック
  */
@@ -153,27 +198,14 @@ export const useSolanaStore = defineStore('solana', {
     freshFetchedAt: 0,
     /** 新規上場リストの取得失敗理由（空状態とエラーを区別して表示する） */
     freshError: '' as string,
-    portfolio: null as Portfolio | null,
-    running: false,
-    method: 'ladder' as DegenMethod,
-    ladderRules: [...DEFAULT_LADDER_RULES] as LadderRule[],
-    watchedPairs: [] as string[],
-    positionMeta: {} as Record<string, PositionMeta>,
+    /** 実行中・一時停止中のセッション一覧（複数同時実行可能） */
+    sessions: [] as DegenSession[],
+    /** セッション既定名の通し番号（重複防止のため永続化） */
+    sessionCounter: 0,
     archives: [] as DegenArchive[],
-    /** 自動スナイプの設定 */
-    autoSnipe: { ...DEFAULT_AUTO_SNIPE } as AutoSnipeConfig,
-    /** 自動スナイプで既にエントリーしたペア（全決済後の再エントリーを防ぐ） */
-    enteredPairs: [] as string[],
-    /**
-     * エントリー済みミント（トークン単位の再エントリー防止）。
-     * 代表プールが移り変わっても同一トークンへの二重エントリーを防ぐ
-     */
-    enteredMints: [] as string[],
     ticking: false,
     restored: false,
     _timer: null as ReturnType<typeof setInterval> | null,
-    /** セッション世代。await 中に終了/再開始された旧ティックの執行を防ぐ（ISSUE-3） */
-    _session: 0,
     /** DexScreener の取得経路。直接取得に失敗したら proxy に切替える（sticky） */
     _dexVia: 'direct' as 'direct' | 'proxy',
     _pricesBusy: false,
@@ -194,12 +226,13 @@ export const useSolanaStore = defineStore('solana', {
     freshDisplay(state): SnipeScore[] {
       return state.freshTokens.slice(0, FRESH_DISPLAY_MAX)
     },
-    /** 自動スナイプ: 現在の監査基準を通過している新規上場トークン数（監視ステータス表示用） */
-    freshAuditPassedCount(state): number {
-      return state.freshTokens.filter((s) =>
-        passesMinimalAudit(s, { allowCaution: state.autoSnipe.allowCaution }),
-      ).length
+    /** 監査基準を通過している新規上場トークン数（監視ステータス表示用） */
+    freshAuditPassedCount(state) {
+      return (allowCaution: boolean): number =>
+        state.freshTokens.filter((s) => passesMinimalAudit(s, { allowCaution })).length
     },
+    sessionById: (state) => (id: string) => state.sessions.find((s) => s.id === id),
+    anyRunning: (state) => state.sessions.some((s) => s.running),
     /** スナイプ銘柄はスクリーニングリスト外のこともあるため freshTokens も探索する */
     tokenOf: (state) => (pairAddress: string): SolanaToken | undefined =>
       state.tokens.find((t) => t.pairAddress === pairAddress) ??
@@ -210,9 +243,12 @@ export const useSolanaStore = defineStore('solana', {
         ...state.tokens.map((t) => [t.pairAddress, t.priceUsd] as const),
       ])
     },
-    summary(state): PortfolioSummary | null {
-      if (!state.portfolio) return null
-      return summarize(state.portfolio, this.priceMap)
+    summaryOf() {
+      return (id: string): PortfolioSummary | null => {
+        const session = this.sessionById(id)
+        if (!session) return null
+        return summarize(session.portfolio, this.priceMap)
+      }
     },
   },
   actions: {
@@ -220,34 +256,53 @@ export const useSolanaStore = defineStore('solana', {
       if (this.restored) return
       const saved = await restore<PersistedDegen>(STORE_KEY)
       if (saved) {
-        this.portfolio = saved.portfolio
-        this.method = saved.method ?? 'ladder'
-        this.ladderRules = saved.ladderRules?.length ? saved.ladderRules : [...DEFAULT_LADDER_RULES]
-        this.watchedPairs = saved.watchedPairs ?? []
-        this.positionMeta = saved.positionMeta ?? {}
         this.archives = saved.archives ?? []
-        // 復元時も開始時と同じクランプを通す（別バージョン・改変データへの防御）
-        this.autoSnipe = saved.autoSnipe ? normalizeAutoSnipe(saved.autoSnipe) : { ...DEFAULT_AUTO_SNIPE }
-        this.enteredPairs = saved.enteredPairs ?? []
-        this.enteredMints = saved.enteredMints ?? []
-        if (saved.running && this.portfolio) this.startTicking()
+        this.sessionCounter = saved.sessionCounter ?? 0
+        if (saved.sessions) {
+          this.sessions = saved.sessions.map((s) => ({
+            ...s,
+            // 復元時も開始時と同じクランプを通す（別バージョン・改変データへの防御）
+            autoSnipe: normalizeAutoSnipe(s.autoSnipe),
+          }))
+        } else if (saved.portfolio) {
+          // 旧形式（単一セッション）からの移行（原則7: 下位互換）
+          this.sessions = [
+            {
+              id: newSessionId(),
+              name: 'セッション 1',
+              createdAt: Date.now(),
+              portfolio: saved.portfolio,
+              running: saved.running ?? false,
+              method: saved.method ?? 'ladder',
+              ladderRules: saved.ladderRules?.length
+                ? saved.ladderRules
+                : [...DEFAULT_LADDER_RULES],
+              watchedPairs: saved.watchedPairs ?? [],
+              positionMeta: saved.positionMeta ?? {},
+              autoSnipe: saved.autoSnipe
+                ? normalizeAutoSnipe(saved.autoSnipe)
+                : { ...DEFAULT_AUTO_SNIPE },
+              enteredPairs: saved.enteredPairs ?? [],
+              enteredMints: saved.enteredMints ?? [],
+            },
+          ]
+        }
+        // 再訪時、実行中セッションは自動再開する（手動ステップを残さない: 原則1）
+        if (this.anyRunning) this.startTicking()
       }
       this.restored = true
     },
     _persist() {
       const payload: PersistedDegen = {
-        portfolio: this.portfolio ? JSON.parse(JSON.stringify(this.portfolio)) : null,
-        running: this.running,
-        method: this.method,
-        ladderRules: JSON.parse(JSON.stringify(this.ladderRules)),
-        watchedPairs: [...this.watchedPairs],
-        positionMeta: JSON.parse(JSON.stringify(this.positionMeta)),
+        sessions: JSON.parse(JSON.stringify(this.sessions)),
+        sessionCounter: this.sessionCounter,
         archives: JSON.parse(JSON.stringify(this.archives)),
-        autoSnipe: { ...this.autoSnipe },
-        enteredPairs: [...this.enteredPairs],
-        enteredMints: [...this.enteredMints],
       }
-      // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）
+      // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）。
+      // 先に実行中セッションの永続化コピーを絞り、アーカイブ（保護対象の記録: BR-7）を温存する
+      payload.sessions = fitSessionsToBudget(payload.sessions!, (s) =>
+        utf8Bytes(JSON.stringify({ ...payload, sessions: s })),
+      )
       payload.archives = fitArchivesToBudget(payload.archives, (a) =>
         utf8Bytes(JSON.stringify({ ...payload, archives: a })),
       )
@@ -284,6 +339,16 @@ export const useSolanaStore = defineStore('solana', {
         .filter((t): t is SolanaToken => t !== null)
         // SOL/USDC 等のメジャーペア自体は除外し、新興トークン側に絞る
         .filter((t) => !['SOL', 'WSOL', 'USDC', 'USDT'].includes(t.baseSymbol.toUpperCase()))
+    },
+    /** 全セッションの監視ペア（watchedPairs）の集合 */
+    _allWatchedPairs(): string[] {
+      const out: string[] = []
+      for (const session of this.sessions) {
+        for (const addr of session.watchedPairs) {
+          if (!out.includes(addr)) out.push(addr)
+        }
+      }
+      return out
     },
     async fetchTokens(force = false) {
       this.loading = this.tokens.length === 0 || (force && this.usingMockData)
@@ -323,10 +388,9 @@ export const useSolanaStore = defineStore('solana', {
           throw new Error('DexScreener の応答に Solana ペアがありません')
         }
         // 保有中トークンの価格は必ず維持する（リストから外れても追跡）
+        const watched = this._allWatchedPairs()
         const held = this.tokens.filter(
-          (t) =>
-            this.watchedPairs.includes(t.pairAddress) &&
-            !tokens.some((n) => n.pairAddress === t.pairAddress),
+          (t) => watched.includes(t.pairAddress) && !tokens.some((n) => n.pairAddress === t.pairAddress),
         )
         this.tokens = [...tokens, ...held]
         this.usingMockData = false
@@ -350,18 +414,23 @@ export const useSolanaStore = defineStore('solana', {
     },
     /**
      * 保有ペア・監視ペアの価格を個別取得して置き換える（replace-or-push）。
+     * 全セッションの保有ポジションを優先し、pairs API の 30 件制約に収める。
      * 呼び出し元は 2 系統:
      *   - tick()（30s・バックグラウンドでも実行）: 検索リスト外ペアの凍結価格防止（ISSUE-P9-H1）
      *   - 画面の表示タイマー（10s）: 一時停止中・復元直後の損益リアルタイム表示
      */
     async refreshDisplayPrices() {
       if (this._pricesBusy || this.usingMockData) return
-      // セッションなし（portfolio=null）の間は無駄な取得をしない（クォータ浪費防止）
-      if (!this.portfolio) return
-      // pairs API の 30 件制約に対し保有ポジションを優先する
-      // （watchedPairs が多い場合でも現役ポジションの価格が必ず更新される: ISSUE-P9-M5）
-      const targets: string[] = this.portfolio.positions.map((p) => p.assetId)
-      for (const addr of this.watchedPairs) {
+      // セッションなしの間は無駄な取得をしない（クォータ浪費防止）
+      if (this.sessions.length === 0) return
+      // 全セッションの保有ポジション → 監視ペアの順で 30 件枠を割り当てる
+      const targets: string[] = []
+      for (const session of this.sessions) {
+        for (const p of session.portfolio.positions) {
+          if (!targets.includes(p.assetId)) targets.push(p.assetId)
+        }
+      }
+      for (const addr of this._allWatchedPairs()) {
         if (!targets.includes(addr)) targets.push(addr)
       }
       const addrs = targets.filter(isValidAddress).slice(0, 30)
@@ -455,7 +524,8 @@ export const useSolanaStore = defineStore('solana', {
       })
     },
     /**
-     * セッション開始。ladder/snipe は即時等分エントリー、ai はティックごとに判断、
+     * 新しいセッションを開始する（既存セッションは動かしたまま追加できる）。
+     * ladder/snipe は即時等分エントリー、ai はティックごとに判断、
      * auto-snipe は選択不要 — 常時監視で監査通過トークンへ随時エントリーする。
      */
     async start(
@@ -463,43 +533,71 @@ export const useSolanaStore = defineStore('solana', {
       pairAddresses: string[],
       method: DegenMethod,
       autoConfig?: Partial<AutoSnipeConfig>,
+      name = '',
     ) {
       const ui = useUiStore()
-      if (this.running) {
-        ui.notify('魔界トレードは既に実行中です', 'warn')
+      if (this.sessions.length >= MAX_DEGEN_SESSIONS) {
+        ui.notify(`同時に実行できるセッションは ${MAX_DEGEN_SESSIONS} 件までです。不要なセッションを終了してください`, 'warn')
         return
       }
       if (method !== 'auto-snipe' && pairAddresses.length === 0) {
         ui.notify('取引対象のトークンを選択してください', 'warn')
         return
       }
+      // 価格取得 30 件バッチに全セッションの保有が収まるよう 1 セッションの選択数を制限
+      if (pairAddresses.length > MAX_PAIRS_PER_SESSION) {
+        ui.notify(`1 セッションで選択できるトークンは ${MAX_PAIRS_PER_SESSION} 件までです`, 'warn')
+        return
+      }
+      // AI 判断 API のレートリミット内に収める合計上限（サイレント縮退の防止）
+      if (method === 'ai') {
+        const aiPairsTotal =
+          this.sessions
+            .filter((s) => s.method === 'ai')
+            .reduce((sum, s) => sum + s.watchedPairs.length, 0) + pairAddresses.length
+        if (aiPairsTotal > MAX_AI_PAIRS_TOTAL) {
+          ui.notify(
+            `AI 取引の合計トークン数は ${MAX_AI_PAIRS_TOTAL} までです（AI 判断 API の混雑防止）。対象を減らすか、ラダー系の手法をご利用ください`,
+            'warn',
+          )
+          return
+        }
+      }
       try {
-        this.archiveCurrent()
-        this._session++
-        this.portfolio = createPortfolio(allocatedUsd)
-        this.watchedPairs = [...pairAddresses]
-        this.method = method
-        this.ladderRules =
-          method === 'snipe' || method === 'auto-snipe'
-            ? [...SNIPE_LADDER_RULES]
-            : [...DEFAULT_LADDER_RULES]
-        this.positionMeta = {}
-        this.enteredPairs = []
-        this.enteredMints = []
-        if (method === 'auto-snipe') this.autoSnipe = normalizeAutoSnipe(autoConfig)
+        const session: DegenSession = {
+          id: newSessionId(),
+          name:
+            name.trim().slice(0, 30) ||
+            `${DEGEN_METHOD_LABELS[method]} ${++this.sessionCounter}`,
+          createdAt: Date.now(),
+          portfolio: createPortfolio(allocatedUsd),
+          running: true,
+          method,
+          ladderRules:
+            method === 'snipe' || method === 'auto-snipe'
+              ? [...SNIPE_LADDER_RULES]
+              : [...DEFAULT_LADDER_RULES],
+          watchedPairs: [...pairAddresses],
+          positionMeta: {},
+          autoSnipe: normalizeAutoSnipe(autoConfig),
+          enteredPairs: [],
+          enteredMints: [],
+        }
+        this.sessions.push(session)
 
         if (method === 'ladder' || method === 'snipe') {
           // 執行直前に選択ペアの最新価格を取得してからエントリーする
-          // （スナイプはローリングプール由来で価格が古い場合があるため。
-          //   watchedPairs は設定済みのため refreshDisplayPrices が選択ペアを更新する）
+          // （スナイプはローリングプール由来で価格が古い場合があるため）
           await this.refreshDisplayPrices()
+          const target = this.sessionById(session.id)
+          if (!target) return
           // ラダー/スナイプ方式: 割当資金を等分して即時エントリーし、以後は出口ルールのみ実行
           const strategyName = method === 'snipe' ? '新規上場スナイプ' : 'ラダーロジック'
           const perToken = allocatedUsd / pairAddresses.length
           for (const addr of pairAddresses) {
             const token = this.tokenOf(addr)
             if (!token || token.priceUsd <= 0) continue
-            const result = executeOrder(this.portfolio, {
+            const result = executeOrder(target.portfolio, {
               assetId: addr,
               side: 'buy',
               notionalUsd: perToken,
@@ -510,22 +608,14 @@ export const useSolanaStore = defineStore('solana', {
                   : `ラダー戦略の初期エントリー（${token.baseSymbol} へ等分投入）`,
               strategy: strategyName,
             })
-            this.portfolio = result.portfolio
-            this.positionMeta[addr] = { entryPriceUsd: token.priceUsd, triggered: [] }
+            target.portfolio = result.portfolio
+            target.positionMeta[addr] = { entryPriceUsd: token.priceUsd, triggered: [] }
           }
         }
 
         this.startTicking()
         this._persist()
-        const label =
-          method === 'ladder'
-            ? 'ラダーロジック'
-            : method === 'snipe'
-              ? '新規上場スナイプ'
-              : method === 'auto-snipe'
-                ? '自動スナイプ（常時監視）'
-                : 'AI 取引'
-        ui.notify(`魔界トレードを開始しました（${label} / $${allocatedUsd.toLocaleString()}）`)
+        ui.notify(`「${session.name}」を開始しました（$${allocatedUsd.toLocaleString()}）`)
       } catch (err) {
         const { code, message } = formatError(err)
         ui.notify(message, 'error', code)
@@ -533,90 +623,99 @@ export const useSolanaStore = defineStore('solana', {
     },
     startTicking() {
       if (this._timer) return
-      this.running = true
       // 再開状態を即時永続化する（リロードで停止状態に巻き戻さない: 原則2）
       this._persist()
       this._timer = setInterval(() => void this.tick(), DEGEN_TICK_MS)
       void this.tick()
     },
-    stop() {
-      if (this._timer) {
+    _stopTimerIfIdle() {
+      if (!this.anyRunning && this._timer) {
         clearInterval(this._timer)
         this._timer = null
       }
-      this.running = false
+    },
+    pause(id: string) {
+      const session = this.sessionById(id)
+      if (!session) return
+      session.running = false
+      this._stopTimerIfIdle()
       this._persist()
     },
-    archiveCurrent() {
-      if (!this.portfolio || this.portfolio.orders.length === 0) {
-        this.portfolio = null
-        return
-      }
-      // 履歴表示用にシンボル対応を保存する（トークンリスト変動後も解決できるように）
-      const symbols: Record<string, string> = {}
-      for (const order of this.portfolio.orders) {
-        const token = this.tokenOf(order.assetId)
-        if (token) symbols[order.assetId] = token.baseSymbol
-      }
-      const tokenSymbols = this.watchedPairs.map(
-        (a) => this.tokenOf(a)?.baseSymbol ?? a.slice(0, 6),
-      )
-      this.archives.unshift({
-        endedAt: Date.now(),
-        summary: summarize(this.portfolio, this.priceMap),
-        method: this.method,
-        tokenSymbols,
-        orders: this.portfolio.orders.slice(-ARCHIVE_ORDERS_MAX),
-        symbols,
-      })
-      // 容量保護: 古いアーカイブは約定明細を落としてサマリーのみ残す（原則2: 記録は保護）
-      this.archives = this.archives
-        .slice(0, 20)
-        .map((a, i) => (i < ARCHIVE_ORDERS_KEEP ? a : { ...a, orders: undefined }))
-      this._session++
-      this.portfolio = null
-      this.positionMeta = {}
-    },
-    endSession() {
-      this.stop()
-      this.archiveCurrent()
+    resume(id: string) {
+      const session = this.sessionById(id)
+      if (!session) return
+      session.running = true
+      this.startTicking()
       this._persist()
-      useUiStore().notify('魔界トレードのセッションを終了し、結果を過去セッションに保存しました')
+    },
+    /** セッション終了（アーカイブへ退避して一覧から除去。履歴は消さない） */
+    endSession(id: string) {
+      const session = this.sessionById(id)
+      if (!session) return
+      if (session.portfolio.orders.length > 0) {
+        // 履歴表示用にシンボル対応を保存する（トークンリスト変動後も解決できるように）
+        const symbols: Record<string, string> = {}
+        for (const order of session.portfolio.orders) {
+          const token = this.tokenOf(order.assetId)
+          if (token) symbols[order.assetId] = token.baseSymbol
+        }
+        const tokenSymbols = session.watchedPairs.map(
+          (a) => this.tokenOf(a)?.baseSymbol ?? a.slice(0, 6),
+        )
+        this.archives.unshift({
+          endedAt: Date.now(),
+          summary: summarize(session.portfolio, this.priceMap),
+          method: session.method,
+          tokenSymbols,
+          orders: session.portfolio.orders.slice(-ARCHIVE_ORDERS_MAX),
+          symbols,
+          name: session.name,
+        })
+        // 容量保護: 古いアーカイブは約定明細を落としてサマリーのみ残す（原則2: 記録は保護）
+        this.archives = this.archives
+          .slice(0, 20)
+          .map((a, i) => (i < ARCHIVE_ORDERS_KEEP ? a : { ...a, orders: undefined }))
+      }
+      this.sessions = this.sessions.filter((s) => s.id !== id)
+      this._stopTimerIfIdle()
+      this._persist()
+      useUiStore().notify(`「${session.name}」を終了し、結果を過去セッションに保存しました`)
     },
     /**
      * 自動スナイプ: 全量決済済みペアを監視対象から外す。
      * pairs API の 30 件制約の枠を現役ポジションのために温存する
-     * （再エントリーの禁止は enteredPairs が別途担うため、剪定しても安全）。
+     * （再エントリーの禁止は enteredPairs/enteredMints が別途担うため、剪定しても安全）。
      * 照合対象（新規上場 48h 窓）に現れ得ない古いエントリー履歴も上限で間引く。
      */
-    _pruneClosedAutoPairs() {
-      if (this.method !== 'auto-snipe' || !this.portfolio) return
-      this.watchedPairs = this.watchedPairs.filter(
-        (addr) => positionOf(this.portfolio!, addr) !== undefined,
+    _pruneClosedAutoPairs(session: DegenSession) {
+      if (session.method !== 'auto-snipe') return
+      session.watchedPairs = session.watchedPairs.filter(
+        (addr) => positionOf(session.portfolio, addr) !== undefined,
       )
-      for (const addr of Object.keys(this.positionMeta)) {
-        if (!this.watchedPairs.includes(addr)) delete this.positionMeta[addr]
+      for (const addr of Object.keys(session.positionMeta)) {
+        if (!session.watchedPairs.includes(addr)) delete session.positionMeta[addr]
       }
-      if (this.enteredPairs.length > 200) this.enteredPairs = this.enteredPairs.slice(-200)
-      if (this.enteredMints.length > 200) this.enteredMints = this.enteredMints.slice(-200)
+      if (session.enteredPairs.length > 200) session.enteredPairs = session.enteredPairs.slice(-200)
+      if (session.enteredMints.length > 200) session.enteredMints = session.enteredMints.slice(-200)
     },
     /**
      * 自動スナイプ（常時監視）の新規エントリー処理。
      * 新規上場リストを更新し、最低限の監査（passesMinimalAudit）を通過した
      * トークンへ、空き枠がある限り等分予算でエントリーする。
-     * 一度エントリーしたペアには再エントリーしない（ラグ後の再急騰への誘い込み対策）。
+     * 一度エントリーしたトークン（ミント単位）には再エントリーしない。
      */
-    async _autoSnipeEntries(session: number) {
+    async _autoSnipeEntries(sessionId: string) {
       await this.fetchFreshTokens()
-      if (this._session !== session || !this.running || !this.portfolio) return
+      let session = this.sessionById(sessionId)
+      if (!session || !session.running) return
       // 参考データ（モック）や古い監視データでは実勢と乖離するためエントリーしない
       if (this.usingMockData) return
       if (Date.now() - this.freshFetchedAt > AUTO_SNIPE_MAX_DATA_AGE_MS) return
 
-      const openPositions = this.portfolio.positions.length
-      const slots = Math.max(0, this.autoSnipe.maxPositions - openPositions)
+      const openPositions = session.portfolio.positions.length
+      const slots = Math.max(0, session.autoSnipe.maxPositions - openPositions)
       if (slots === 0) return
-      const perSlot = this.portfolio.initialUsd / this.autoSnipe.maxPositions
+      const perSlot = session.portfolio.initialUsd / session.autoSnipe.maxPositions
 
       // 1) 監査通過・未エントリーの候補を空き枠の数だけ確定する。
       //    ローリングプールにはフィード落ちした古い情報のエントリーも残るため、
@@ -628,11 +727,11 @@ export const useSolanaStore = defineStore('solana', {
         if (candidates.length >= slots) break
         const addr = score.token.pairAddress
         if (now - (this.freshSeenAt[addr] ?? this.freshFetchedAt) > AUTO_SNIPE_MAX_DATA_AGE_MS) continue
-        if (!passesMinimalAudit(score, { allowCaution: this.autoSnipe.allowCaution })) continue
+        if (!passesMinimalAudit(score, { allowCaution: session.autoSnipe.allowCaution })) continue
         // 再エントリー防止はトークン（ミント）単位。代表プールの移り変わりでも二重エントリーしない
-        if (this.enteredMints.includes(score.token.baseAddress)) continue
-        if (this.enteredPairs.includes(addr)) continue
-        if (positionOf(this.portfolio, addr)) continue
+        if (session.enteredMints.includes(score.token.baseAddress)) continue
+        if (session.enteredPairs.includes(addr)) continue
+        if (positionOf(session.portfolio, addr)) continue
         candidates.push(score)
       }
       if (candidates.length === 0) return
@@ -657,17 +756,18 @@ export const useSolanaStore = defineStore('solana', {
       } catch {
         /* 直前価格の取得失敗は監視価格で継続 */
       }
-      if (this._session !== session || !this.running || !this.portfolio) return
+      // await 中にセッションが終了/一時停止されていたら執行しない（ISSUE-3 と同水準）
+      session = this.sessionById(sessionId)
+      if (!session || !session.running) return
 
       // 3) エントリー実行
       for (const score of candidates) {
-        if (!this.portfolio) break
         const addr = score.token.pairAddress
-        const notionalUsd = Math.min(perSlot, this.portfolio.cashUsd)
+        const notionalUsd = Math.min(perSlot, session.portfolio.cashUsd)
         if (notionalUsd < AUTO_SNIPE_MIN_ENTRY_USD) break
         if (score.token.priceUsd <= 0) continue
         try {
-          const result = executeOrder(this.portfolio, {
+          const result = executeOrder(session.portfolio, {
             assetId: addr,
             side: 'buy',
             notionalUsd,
@@ -675,11 +775,11 @@ export const useSolanaStore = defineStore('solana', {
             reason: `自動スナイプ: 監査通過（スコア ${score.total}・${score.verdict === 'candidate' ? '候補' : '要注意'}）の新規上場 ${score.token.baseSymbol} へエントリー`,
             strategy: '自動スナイプ',
           })
-          this.portfolio = result.portfolio
-          this.positionMeta[addr] = { entryPriceUsd: score.token.priceUsd, triggered: [] }
-          this.enteredPairs.push(addr)
-          this.enteredMints.push(score.token.baseAddress)
-          if (!this.watchedPairs.includes(addr)) this.watchedPairs.push(addr)
+          session.portfolio = result.portfolio
+          session.positionMeta[addr] = { entryPriceUsd: score.token.priceUsd, triggered: [] }
+          session.enteredPairs.push(addr)
+          session.enteredMints.push(score.token.baseAddress)
+          if (!session.watchedPairs.includes(addr)) session.watchedPairs.push(addr)
         } catch (err) {
           // 資金不足等は記録して継続（原則4）
           const { code, message } = formatError(err)
@@ -687,124 +787,143 @@ export const useSolanaStore = defineStore('solana', {
         }
       }
     },
-    async tick() {
-      if (this.ticking || !this.running || !this.portfolio) return
-      this.ticking = true
-      const session = this._session
-      try {
-        await this.fetchTokens()
-        // await 中にセッションが終了/再開始されていたら旧判断を執行しない（ISSUE-3）
-        if (this._session !== session || !this.running || !this.portfolio) return
+    /** 1 セッション分の判断・執行（tick から呼ばれる。await 後は id で引き直す） */
+    async _processSession(sessionId: string) {
+      // 自動スナイプ: 監視 → 監査 → 随時エントリー（出口は下のラダー共通処理）
+      const initial = this.sessionById(sessionId)
+      if (!initial || !initial.running) return
+      if (initial.method === 'auto-snipe') {
+        await this._autoSnipeEntries(sessionId)
+      }
+      const session = this.sessionById(sessionId)
+      if (!session || !session.running) return
 
-        // 自動スナイプ: 監視 → 監査 → 随時エントリー（出口は下のラダー共通処理）
-        if (this.method === 'auto-snipe') {
-          await this._autoSnipeEntries(session)
-          if (this._session !== session || !this.running || !this.portfolio) return
-        }
+      const strategy = useStrategyStore().docFor('solana')
+      const prices = this.priceMap
+      // AI 縮退はティック単位で集約する（ペアごとの上書きでは最後の1件の成否しか残らない）
+      let aiFailures = 0
+      let aiSuccesses = 0
 
-        const strategy = useStrategyStore().docFor('solana')
-        const prices = this.priceMap
+      for (const addr of [...session.watchedPairs]) {
+        const current = this.sessionById(sessionId)
+        if (!current || !current.running) return
+        const token = this.tokenOf(addr)
+        if (!token || token.priceUsd <= 0) continue
+        const pos = positionOf(current.portfolio, addr)
 
-        for (const addr of [...this.watchedPairs]) {
-          if (!this.portfolio) break
-          const token = this.tokenOf(addr)
-          if (!token || token.priceUsd <= 0) continue
-          const pos = positionOf(this.portfolio, addr)
-
-          if (this.method !== 'ai') {
-            // ラダー/スナイプ: エントリー価格基準の出口ルールを機械的に執行
-            if (!pos) continue
-            const meta = this.positionMeta[addr]
-            if (!meta) continue
-            const strategyName =
-              this.method === 'snipe'
-                ? '新規上場スナイプ'
-                : this.method === 'auto-snipe'
-                  ? '自動スナイプ'
-                  : 'ラダーロジック'
-            const fired = checkLadder(meta.entryPriceUsd, token.priceUsd, this.ladderRules, meta.triggered)
-            for (const { index, rule } of fired) {
-              const current = positionOf(this.portfolio, addr)
-              if (!current || current.quantity <= 0) break
-              // 数量指定で発注（notional 逆算の誤差で全量損切りが失敗しない: ISSUE-2）
-              const sellQty = current.quantity * rule.sellRatio
-              if (sellQty * token.priceUsd < 0.01) {
-                meta.triggered.push(index)
-                continue
-              }
-              try {
-                const result = executeOrder(this.portfolio, {
-                  assetId: addr,
-                  side: 'sell',
-                  quantity: sellQty,
-                  priceUsd: token.priceUsd,
-                  reason:
-                    rule.triggerPct >= 0
-                      ? `ラダー利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`
-                      : `ラダー損切り: ${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`,
-                  strategy: strategyName,
-                })
-                this.portfolio = result.portfolio
-                meta.triggered.push(index)
-              } catch (err) {
-                const { code, message } = formatError(err)
-                console.warn(`[${code}] ${message}`)
-              }
+        if (current.method !== 'ai') {
+          // ラダー/スナイプ: エントリー価格基準の出口ルールを機械的に執行
+          if (!pos) continue
+          const meta = current.positionMeta[addr]
+          if (!meta) continue
+          const strategyName =
+            current.method === 'snipe'
+              ? '新規上場スナイプ'
+              : current.method === 'auto-snipe'
+                ? '自動スナイプ'
+                : 'ラダーロジック'
+          const fired = checkLadder(meta.entryPriceUsd, token.priceUsd, current.ladderRules, meta.triggered)
+          for (const { index, rule } of fired) {
+            const position = positionOf(current.portfolio, addr)
+            if (!position || position.quantity <= 0) break
+            // 数量指定で発注（notional 逆算の誤差で全量損切りが失敗しない: ISSUE-2）
+            const sellQty = position.quantity * rule.sellRatio
+            if (sellQty * token.priceUsd < 0.01) {
+              meta.triggered.push(index)
+              continue
             }
-          } else {
-            // AI 取引
-            const equity = portfolioEquity(this.portfolio, prices)
-            const exposureRatio = equity > 0 ? ((pos?.quantity ?? 0) * token.priceUsd) / equity : 0
-            const unrealizedPct =
-              pos && pos.avgCostUsd > 0
-                ? ((token.priceUsd - pos.avgCostUsd) / pos.avgCostUsd) * 100
-                : null
-            let decision: TradeDecision
             try {
-              decision = await $fetch<TradeDecision>('/api/ai/degen-decision', {
-                method: 'POST',
-                body: {
-                  token,
-                  strategy,
-                  exposureRatio,
-                  unrealizedPct,
-                  library: useStrategyStore().allDocs.slice(0, 10),
-                },
-                headers: await aiAuthHeaders(),
-                timeout: 12_000,
-              })
-            } catch {
-              decision = decideDegenTrade(token, { strategy, unrealizedPct, exposureRatio })
-            }
-            // await 中のセッション切替を検知したら旧判断を破棄（ISSUE-3）
-            if (this._session !== session || !this.running || !this.portfolio) return
-            try {
-              const result = applyDecision(this.portfolio, decision, {
+              const result = executeOrder(current.portfolio, {
                 assetId: addr,
+                side: 'sell',
+                quantity: sellQty,
                 priceUsd: token.priceUsd,
-                strategy: strategy.name,
-                prices,
+                reason:
+                  rule.triggerPct >= 0
+                    ? `ラダー利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`
+                    : `ラダー損切り: ${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`,
+                strategy: strategyName,
               })
-              if (result) {
-                this.portfolio = result.portfolio
-                if (result.order.side === 'buy' && !this.positionMeta[addr]) {
-                  this.positionMeta[addr] = { entryPriceUsd: token.priceUsd, triggered: [] }
-                }
-                if (result.order.side === 'sell' && !positionOf(this.portfolio, addr)) {
-                  delete this.positionMeta[addr]
-                }
-              }
+              current.portfolio = result.portfolio
+              meta.triggered.push(index)
             } catch (err) {
               const { code, message } = formatError(err)
               console.warn(`[${code}] ${message}`)
             }
           }
+        } else {
+          // AI 取引
+          const equity = portfolioEquity(current.portfolio, prices)
+          const exposureRatio = equity > 0 ? ((pos?.quantity ?? 0) * token.priceUsd) / equity : 0
+          const unrealizedPct =
+            pos && pos.avgCostUsd > 0
+              ? ((token.priceUsd - pos.avgCostUsd) / pos.avgCostUsd) * 100
+              : null
+          let decision: TradeDecision
+          let degraded = false
+          try {
+            decision = await $fetch<TradeDecision>('/api/ai/degen-decision', {
+              method: 'POST',
+              body: {
+                token,
+                strategy,
+                exposureRatio,
+                unrealizedPct,
+                library: useStrategyStore().allDocs.slice(0, 10),
+              },
+              headers: await aiAuthHeaders(),
+              timeout: 12_000,
+            })
+          } catch {
+            decision = decideDegenTrade(token, { strategy, unrealizedPct, exposureRatio })
+            degraded = true
+          }
+          // await 中のセッション終了/一時停止を検知したら旧判断を破棄（ISSUE-3）
+          const after = this.sessionById(sessionId)
+          if (!after || !after.running) return
+          if (degraded) aiFailures++
+          else aiSuccesses++
+          try {
+            const result = applyDecision(after.portfolio, decision, {
+              assetId: addr,
+              priceUsd: token.priceUsd,
+              strategy: strategy.name,
+              prices,
+            })
+            if (result) {
+              after.portfolio = result.portfolio
+              if (result.order.side === 'buy' && !after.positionMeta[addr]) {
+                after.positionMeta[addr] = { entryPriceUsd: token.priceUsd, triggered: [] }
+              }
+              if (result.order.side === 'sell' && !positionOf(after.portfolio, addr)) {
+                delete after.positionMeta[addr]
+              }
+            }
+          } catch (err) {
+            const { code, message } = formatError(err)
+            console.warn(`[${code}] ${message}`)
+          }
         }
+      }
 
-        // 自動スナイプ: 全量決済済みペアの監視を剪定（価格取得 30 件枠の温存: ISSUE-P9-M5）
-        if (this.method === 'auto-snipe') this._pruneClosedAutoPairs()
-
-        if (this.portfolio) this.portfolio = recordEquity(this.portfolio, this.priceMap)
+      const done = this.sessionById(sessionId)
+      if (!done) return
+      // 1件でも縮退したらバッジ表示、全件成功したティックでのみ解除（途中中断時は維持）
+      if (aiFailures > 0) done.aiDegradedAt = Date.now()
+      else if (aiSuccesses > 0) done.aiDegradedAt = undefined
+      // 自動スナイプ: 全量決済済みペアの監視を剪定（価格取得 30 件枠の温存: ISSUE-P9-M5）
+      this._pruneClosedAutoPairs(done)
+      done.portfolio = recordEquity(done.portfolio, this.priceMap)
+    },
+    /** 1ティック: 市場データを一度だけ更新し、実行中の全セッションを順に処理する */
+    async tick() {
+      if (this.ticking || !this.anyRunning) return
+      this.ticking = true
+      try {
+        await this.fetchTokens()
+        for (const id of this.sessions.filter((s) => s.running).map((s) => s.id)) {
+          await this._processSession(id)
+        }
         this._persist()
       } finally {
         this.ticking = false

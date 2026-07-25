@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { decideTrade, fallbackInsight } from '~/shared/advisor'
 import { formatError } from '~/shared/errors'
+import { fitArchivesToBudget, fitSessionsToBudget, utf8Bytes } from '~/shared/persistBudget'
 import {
   applyDecision,
   createPortfolio,
@@ -9,7 +10,6 @@ import {
   recordEquity,
   summarize,
 } from '~/shared/tradeEngine'
-import { fitArchivesToBudget, utf8Bytes } from '~/shared/persistBudget'
 import type { Order, Portfolio, PortfolioSummary, TradeDecision } from '~/shared/types'
 import { aiAuthHeaders } from '~/composables/useFirebase'
 import { persist, restore } from '~/composables/usePersistence'
@@ -20,12 +20,35 @@ import { useUiStore } from '~/stores/ui'
 const STORE_KEY = 'demo-trade'
 /** 判断ティック間隔（価格ポーリング 15s に対し 20s で1テンポ遅らせる） */
 export const TICK_INTERVAL_MS = 20_000
+/** 同時に持てるセッション数の上限（UI・保存の複雑性の抑制） */
+export const MAX_DEMO_SESSIONS = 5
+/**
+ * AI エンジンのセッション×銘柄の合計上限。20s ティック = 3 回/分のため
+ * 8 銘柄で最大 24 回/分。AI API のレートリミット（uid 単位 40/分）は
+ * Solana魔界の AI 手法（最大 12 回/分）・市場インサイト・実トレードの
+ * 手動 AI 判断と**共有**のため、自動枠の合算 36 回/分 + 手動系の余裕
+ * 4 回/分 で 40/分内に収める（ISSUE-P9-M13）
+ */
+export const MAX_AI_ASSETS_TOTAL = 8
 /** アーカイブ1件に保存する約定履歴の上限（Firestore ドキュメント容量保護） */
 const ARCHIVE_ORDERS_MAX = 100
 /** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
 const ARCHIVE_ORDERS_KEEP = 10
 
 export type EngineMode = 'ai' | 'logic'
+
+/** 自動売買セッション（複数同時実行可能: F-04） */
+export interface DemoSession {
+  id: string
+  name: string
+  createdAt: number
+  portfolio: Portfolio
+  running: boolean
+  assetIds: string[]
+  engineMode: EngineMode
+  /** AI 判断がレートリミット等でロジックへ縮退した最終時刻（UI で明示する） */
+  aiDegradedAt?: number
+}
 
 interface ArchivedSession {
   endedAt: number
@@ -34,42 +57,60 @@ interface ArchivedSession {
   assetIds: string[]
   /** 約定履歴（閲覧用: F-04）。容量保護のため直近セッション分のみ保持 */
   orders?: Order[]
+  /** セッション名（複数セッション対応後の追加フィールド） */
+  name?: string
 }
 
+/** 旧形式（単一セッション）を含む永続化ペイロード */
 interface PersistedDemo {
-  portfolio: Portfolio | null
-  running: boolean
-  assetIds: string[]
-  engineMode: EngineMode
+  sessions?: DemoSession[]
+  /** セッション既定名の通し番号（途中終了で番号が重複しないよう永続化） */
+  sessionCounter?: number
   archives: ArchivedSession[]
+  /** 旧形式（v1: 単一セッション）。移行用に残す（原則7） */
+  portfolio?: Portfolio | null
+  running?: boolean
+  assetIds?: string[]
+  engineMode?: EngineMode
+}
+
+let sessionSeq = 0
+function newSessionId(): string {
+  return `demo-${Date.now().toString(36)}-${++sessionSeq}-${Math.random().toString(36).slice(2, 6)}`
 }
 
 /**
  * AI デモトレードストア（UC-4 / F-04）。
- * - 初期資金を設定し、選択銘柄を AI/ロジックが自動売買する
+ * - **複数セッションを同時実行**できる（それぞれ独立した資金・銘柄・エンジン・実行状態）
+ * - ティックはストアで一本化し、実行中の全セッションを順に処理する（API 負荷の平準化）
  * - 注文履歴は追記型（BR-7）。過去セッションはアーカイブとして保護する（原則2）
  */
 export const useDemoTradeStore = defineStore('demoTrade', {
   state: () => ({
-    portfolio: null as Portfolio | null,
-    running: false,
-    assetIds: [] as string[],
-    engineMode: 'logic' as EngineMode,
+    sessions: [] as DemoSession[],
+    /** セッション既定名の通し番号（重複防止のため永続化） */
+    sessionCounter: 0,
     archives: [] as ArchivedSession[],
     ticking: false,
     restored: false,
     _timer: null as ReturnType<typeof setInterval> | null,
-    /** セッション世代。await 中に終了/再開始された旧ティックの執行を防ぐ（ISSUE-3） */
-    _session: 0,
   }),
   getters: {
-    summary(state): PortfolioSummary | null {
-      if (!state.portfolio) return null
-      return summarize(state.portfolio, useMarketStore().priceMap)
+    sessionById: (state) => (id: string) => state.sessions.find((s) => s.id === id),
+    anyRunning: (state) => state.sessions.some((s) => s.running),
+    summaryOf() {
+      return (id: string): PortfolioSummary | null => {
+        const session = this.sessionById(id)
+        if (!session) return null
+        return summarize(session.portfolio, useMarketStore().priceMap)
+      }
     },
-    equityUsd(state): number {
-      if (!state.portfolio) return 0
-      return portfolioEquity(state.portfolio, useMarketStore().priceMap)
+    equityOf() {
+      return (id: string): number => {
+        const session = this.sessionById(id)
+        if (!session) return 0
+        return portfolioEquity(session.portfolio, useMarketStore().priceMap)
+      }
     },
   },
   actions: {
@@ -77,24 +118,42 @@ export const useDemoTradeStore = defineStore('demoTrade', {
       if (this.restored) return
       const saved = await restore<PersistedDemo>(STORE_KEY)
       if (saved) {
-        this.portfolio = saved.portfolio
-        this.assetIds = saved.assetIds ?? []
-        this.engineMode = saved.engineMode ?? 'logic'
         this.archives = saved.archives ?? []
+        this.sessionCounter = saved.sessionCounter ?? 0
+        if (saved.sessions) {
+          this.sessions = saved.sessions
+        } else if (saved.portfolio) {
+          // 旧形式（単一セッション）からの移行（原則7: 下位互換）
+          this.sessions = [
+            {
+              id: newSessionId(),
+              name: 'セッション 1',
+              createdAt: Date.now(),
+              portfolio: saved.portfolio,
+              running: saved.running ?? false,
+              assetIds: saved.assetIds ?? [],
+              engineMode: saved.engineMode ?? 'logic',
+            },
+          ]
+          // 移行セッションが「セッション 1」を使うため、次の既定名は「セッション 2」から
+          this.sessionCounter = Math.max(this.sessionCounter, 1)
+        }
         // 再訪時、実行中セッションは自動再開する（手動ステップを残さない: 原則1）
-        if (saved.running && this.portfolio) this.startTicking()
+        if (this.anyRunning) this.startTicking()
       }
       this.restored = true
     },
     _persist() {
       const payload: PersistedDemo = {
-        portfolio: this.portfolio ? JSON.parse(JSON.stringify(this.portfolio)) : null,
-        running: this.running,
-        assetIds: [...this.assetIds],
-        engineMode: this.engineMode,
+        sessions: JSON.parse(JSON.stringify(this.sessions)),
+        sessionCounter: this.sessionCounter,
         archives: JSON.parse(JSON.stringify(this.archives)),
       }
-      // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）
+      // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）。
+      // 先に実行中セッションの永続化コピーを絞り、アーカイブ（保護対象の記録: BR-7）を温存する
+      payload.sessions = fitSessionsToBudget(payload.sessions!, (s) =>
+        utf8Bytes(JSON.stringify({ ...payload, sessions: s })),
+      )
       payload.archives = fitArchivesToBudget(payload.archives, (a) =>
         utf8Bytes(JSON.stringify({ ...payload, archives: a })),
       )
@@ -114,26 +173,45 @@ export const useDemoTradeStore = defineStore('demoTrade', {
         .slice(0, limit)
         .map(({ assetId, confidence, summary }) => ({ assetId, confidence, summary }))
     },
-    start(initialUsd: number, assetIds: string[], engineMode: EngineMode) {
+    /** 新しいセッションを開始する（既存セッションは動かしたまま追加できる） */
+    start(initialUsd: number, assetIds: string[], engineMode: EngineMode, name = '') {
       const ui = useUiStore()
-      if (this.running) {
-        ui.notify('デモトレードは既に実行中です', 'warn')
+      if (this.sessions.length >= MAX_DEMO_SESSIONS) {
+        ui.notify(`同時に実行できるセッションは ${MAX_DEMO_SESSIONS} 件までです。不要なセッションを終了してください`, 'warn')
         return
       }
       if (assetIds.length === 0) {
         ui.notify('取引対象の銘柄を1つ以上選択してください', 'warn')
         return
       }
+      // AI 判断 API のレートリミット（認証済み 40/分）内に収める合計上限（サイレント縮退の防止）
+      if (engineMode === 'ai') {
+        const aiAssetsTotal =
+          this.sessions
+            .filter((s) => s.engineMode === 'ai')
+            .reduce((sum, s) => sum + s.assetIds.length, 0) + assetIds.length
+        if (aiAssetsTotal > MAX_AI_ASSETS_TOTAL) {
+          ui.notify(
+            `AI エンジンの合計銘柄数は ${MAX_AI_ASSETS_TOTAL} までです（AI 判断 API の混雑防止）。銘柄数を減らすか、ロジックエンジンをご利用ください`,
+            'warn',
+          )
+          return
+        }
+      }
       try {
-        // 既存セッションがあればアーカイブしてから新規開始（進捗の巻き戻し防止: 原則2）
-        this.archiveCurrent()
-        this._session++
-        this.portfolio = createPortfolio(initialUsd)
-        this.assetIds = [...assetIds]
-        this.engineMode = engineMode
+        const session: DemoSession = {
+          id: newSessionId(),
+          name: name.trim().slice(0, 30) || `セッション ${++this.sessionCounter}`,
+          createdAt: Date.now(),
+          portfolio: createPortfolio(initialUsd),
+          running: true,
+          assetIds: [...assetIds],
+          engineMode,
+        }
+        this.sessions.push(session)
         this.startTicking()
         this._persist()
-        ui.notify(`デモトレードを開始しました（初期資金 $${initialUsd.toLocaleString()}）`)
+        ui.notify(`「${session.name}」を開始しました（初期資金 $${initialUsd.toLocaleString()}）`)
       } catch (err) {
         const { code, message } = formatError(err)
         ui.notify(message, 'error', code)
@@ -141,114 +219,151 @@ export const useDemoTradeStore = defineStore('demoTrade', {
     },
     startTicking() {
       if (this._timer) return
-      this.running = true
       // 再開状態を即時永続化する（リロードで停止状態に巻き戻さない: 原則2）
       this._persist()
       this._timer = setInterval(() => void this.tick(), TICK_INTERVAL_MS)
       void this.tick()
     },
-    stop() {
-      if (this._timer) {
+    _stopTimerIfIdle() {
+      if (!this.anyRunning && this._timer) {
         clearInterval(this._timer)
         this._timer = null
       }
-      this.running = false
+    },
+    pause(id: string) {
+      const session = this.sessionById(id)
+      if (!session) return
+      session.running = false
+      this._stopTimerIfIdle()
       this._persist()
     },
-    /** 現在のセッションをアーカイブへ退避（履歴は消さない） */
-    archiveCurrent() {
-      if (!this.portfolio || this.portfolio.orders.length === 0) {
-        this.portfolio = null
-        return
+    resume(id: string) {
+      const session = this.sessionById(id)
+      if (!session) return
+      session.running = true
+      this.startTicking()
+      this._persist()
+    },
+    /** セッション終了（アーカイブへ退避して一覧から除去。履歴は消さない） */
+    endSession(id: string) {
+      const session = this.sessionById(id)
+      if (!session) return
+      if (session.portfolio.orders.length > 0) {
+        const strategyName = useStrategyStore().docFor('demo').name
+        this.archives.unshift({
+          endedAt: Date.now(),
+          summary: summarize(session.portfolio, useMarketStore().priceMap),
+          strategyName,
+          assetIds: [...session.assetIds],
+          orders: session.portfolio.orders.slice(-ARCHIVE_ORDERS_MAX),
+          name: session.name,
+        })
+        // 容量保護: 古いアーカイブは約定明細を落としてサマリーのみ残す（原則2: 記録は保護）
+        this.archives = this.archives
+          .slice(0, 20)
+          .map((a, i) => (i < ARCHIVE_ORDERS_KEEP ? a : { ...a, orders: undefined }))
       }
-      const strategyName = useStrategyStore().docFor('demo').name
-      this.archives.unshift({
-        endedAt: Date.now(),
-        summary: summarize(this.portfolio, useMarketStore().priceMap),
-        strategyName,
-        assetIds: [...this.assetIds],
-        orders: this.portfolio.orders.slice(-ARCHIVE_ORDERS_MAX),
-      })
-      // 容量保護: 古いアーカイブは約定明細を落としてサマリーのみ残す（原則2: 記録は保護）
-      this.archives = this.archives
-        .slice(0, 20)
-        .map((a, i) => (i < ARCHIVE_ORDERS_KEEP ? a : { ...a, orders: undefined }))
-      this._session++
-      this.portfolio = null
-    },
-    /** セッション終了（停止 + アーカイブ） */
-    endSession() {
-      this.stop()
-      this.archiveCurrent()
+      this.sessions = this.sessions.filter((s) => s.id !== id)
+      this._stopTimerIfIdle()
       this._persist()
-      useUiStore().notify('セッションを終了し、結果を過去セッション（約定履歴つき）に保存しました')
+      useUiStore().notify(`「${session.name}」を終了し、結果を過去セッション（約定履歴つき）に保存しました`)
     },
-    /** 1ティック分の自動売買。銘柄ごとに判断 → 執行 → 資産推移記録 */
+    /** 1ティック分の自動売買。実行中の全セッション × 銘柄ごとに判断 → 執行 → 資産推移記録 */
     async tick() {
-      if (this.ticking || !this.running || !this.portfolio) return
+      if (this.ticking) return
       this.ticking = true
-      const session = this._session
       try {
         const market = useMarketStore()
         const strategyStore = useStrategyStore()
         const strategy = strategyStore.docFor('demo')
-        const prices = market.priceMap
 
-        for (const assetId of [...this.assetIds]) {
-          if (!this.portfolio) break
-          const ticker = market.tickerOf(assetId)
-          if (!ticker || ticker.priceUsd <= 0) continue
+        for (const id of this.sessions.filter((s) => s.running).map((s) => s.id)) {
+          // await を挟むためセッションは毎回 id で引き直す（終了済みなら処理しない）
+          const session = this.sessionById(id)
+          if (!session || !session.running) continue
+          const prices = market.priceMap
+          // AI 縮退はティック単位で集約する（銘柄ごとの上書きでは最後の1件の成否しか残らない）
+          let aiFailures = 0
+          let aiSuccesses = 0
+          let interrupted = false
 
-          const equity = portfolioEquity(this.portfolio, prices)
-          const pos = positionOf(this.portfolio, assetId)
-          const exposureRatio = equity > 0 ? ((pos?.quantity ?? 0) * ticker.priceUsd) / equity : 0
-          const unrealizedPct =
-            pos && pos.avgCostUsd > 0
-              ? ((ticker.priceUsd - pos.avgCostUsd) / pos.avgCostUsd) * 100
-              : null
+          for (const assetId of [...session.assetIds]) {
+            const current = this.sessionById(id)
+            if (!current || !current.running) {
+              interrupted = true
+              break
+            }
+            const ticker = market.tickerOf(assetId)
+            if (!ticker || ticker.priceUsd <= 0) continue
 
-          let decision: TradeDecision
-          if (this.engineMode === 'ai') {
-            try {
-              decision = await $fetch<TradeDecision>('/api/ai/decision', {
-                method: 'POST',
-                body: {
-                  ticker,
-                  strategy,
-                  exposureRatio,
-                  unrealizedPct,
-                  library: strategyStore.allDocs.slice(0, 10),
-                },
-                headers: await aiAuthHeaders(),
-                timeout: 12_000,
-              })
-            } catch {
-              // サーバー未達時はローカルロジックにフォールバック（BR-5）
+            const equity = portfolioEquity(current.portfolio, prices)
+            const pos = positionOf(current.portfolio, assetId)
+            const exposureRatio = equity > 0 ? ((pos?.quantity ?? 0) * ticker.priceUsd) / equity : 0
+            const unrealizedPct =
+              pos && pos.avgCostUsd > 0
+                ? ((ticker.priceUsd - pos.avgCostUsd) / pos.avgCostUsd) * 100
+                : null
+
+            let decision: TradeDecision
+            if (current.engineMode === 'ai') {
+              let degraded = false
+              try {
+                decision = await $fetch<TradeDecision>('/api/ai/decision', {
+                  method: 'POST',
+                  body: {
+                    ticker,
+                    strategy,
+                    exposureRatio,
+                    unrealizedPct,
+                    library: strategyStore.allDocs.slice(0, 10),
+                  },
+                  headers: await aiAuthHeaders(),
+                  timeout: 12_000,
+                })
+              } catch {
+                // サーバー未達・レートリミット時はローカルロジックにフォールバック（BR-5）
+                decision = decideTrade(ticker, { strategy, exposureRatio, unrealizedPct })
+                degraded = true
+              }
+              // await 中にセッションが終了されていたら旧判断を破棄（ISSUE-3）
+              const after = this.sessionById(id)
+              if (!after || !after.running) {
+                interrupted = true
+                break
+              }
+              if (degraded) aiFailures++
+              else aiSuccesses++
+            } else {
               decision = decideTrade(ticker, { strategy, exposureRatio, unrealizedPct })
             }
-            // await 中にセッションが終了/再開始されていたら旧判断を破棄（ISSUE-3）
-            if (this._session !== session || !this.running || !this.portfolio) return
-          } else {
-            decision = decideTrade(ticker, { strategy, exposureRatio, unrealizedPct })
+
+            try {
+              const target = this.sessionById(id)
+              if (!target) break
+              const result = applyDecision(target.portfolio, decision, {
+                assetId,
+                priceUsd: ticker.priceUsd,
+                strategy: strategy.name,
+                prices,
+              })
+              if (result) target.portfolio = result.portfolio
+            } catch (err) {
+              // 資金不足等はコード付きで記録して継続（原則4）
+              const { code, message } = formatError(err)
+              console.warn(`[${code}] ${message}`)
+            }
           }
 
-          try {
-            const result = applyDecision(this.portfolio, decision, {
-              assetId,
-              priceUsd: ticker.priceUsd,
-              strategy: strategy.name,
-              prices,
-            })
-            if (result) this.portfolio = result.portfolio
-          } catch (err) {
-            // 資金不足等はコード付きで記録して継続（原則4）
-            const { code, message } = formatError(err)
-            console.warn(`[${code}] ${message}`)
+          const done = this.sessionById(id)
+          if (done) {
+            // 1件でも縮退したらバッジ表示、全件成功したティックでのみ解除。
+            // 一時停止等で中断した不完全ティックでは変更しない（solana 側と同じ意味論）
+            if (!interrupted) {
+              if (aiFailures > 0) done.aiDegradedAt = Date.now()
+              else if (aiSuccesses > 0) done.aiDegradedAt = undefined
+            }
+            done.portfolio = recordEquity(done.portfolio, market.priceMap)
           }
-        }
-
-        if (this.portfolio) {
-          this.portfolio = recordEquity(this.portfolio, market.priceMap)
         }
         this._persist()
       } finally {

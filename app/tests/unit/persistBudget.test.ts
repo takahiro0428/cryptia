@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { fitArchivesToBudget, utf8Bytes } from '~/shared/persistBudget'
+import { fitArchivesToBudget, fitSessionsToBudget, utf8Bytes } from '~/shared/persistBudget'
+import type { Portfolio } from '~/shared/types'
 
 interface Arch {
   id: number
@@ -54,5 +55,65 @@ describe('persistBudget: 保存容量の実測保証', () => {
     const archives = [arch(1, 50), arch(2, 50)]
     fitArchivesToBudget(archives, measure, 100)
     expect(archives[1].orders).toHaveLength(50)
+  })
+})
+
+interface Sess {
+  id: string
+  portfolio: Portfolio
+}
+
+/** テスト用: セッション列のみのペイロードのバイト数 */
+const measureSessions = (sessions: Sess[]) => utf8Bytes(JSON.stringify({ sessions }))
+
+function sess(id: string, orderCount: number, curveCount = 500): Sess {
+  return {
+    id,
+    portfolio: {
+      cashUsd: 1000,
+      initialUsd: 1000,
+      positions: [{ assetId: 'x', quantity: 1, avgCostUsd: 1 }],
+      orders: Array.from({ length: orderCount }, (_, i) => ({
+        id: `o${i}`,
+        assetId: 'x',
+        side: 'buy' as const,
+        quantity: 1,
+        priceUsd: 1,
+        notionalUsd: 1,
+        realizedPnlUsd: 0,
+        reason: 'あ'.repeat(80),
+        strategy: 's',
+        executedAt: i,
+      })),
+      equityCurve: Array.from({ length: curveCount }, (_, i) => ({ at: i, equityUsd: 1000 })),
+    },
+  }
+}
+
+describe('persistBudget: 実行中セッション列の容量保証（マルチセッション対応）', () => {
+  it('予算内ならそのまま返す（切り詰めなし）', () => {
+    const sessions = [sess('a', 10, 20)]
+    expect(fitSessionsToBudget(sessions, measureSessions, 100_000)).toBe(sessions)
+  })
+
+  it('超過時は永続化コピーの orders / equityCurve を段階的に絞って予算内へ収める', () => {
+    const sessions = [sess('a', 800), sess('b', 800), sess('c', 800)]
+    const budget = 120_000
+    const result = fitSessionsToBudget(sessions, measureSessions, budget)
+    expect(measureSessions(result)).toBeLessThanOrEqual(budget)
+    // 直近の約定が保持される（末尾優先の slice）
+    for (const s of result) {
+      const orders = s.portfolio.orders
+      expect(orders.length).toBeLessThan(800)
+      expect(orders[orders.length - 1]!.id).toBe('o799')
+      expect(s.portfolio.equityCurve.length).toBeLessThanOrEqual(200)
+    }
+  })
+
+  it('元の配列・実行中データを破壊しない（イミュータブル）', () => {
+    const sessions = [sess('a', 800)]
+    fitSessionsToBudget(sessions, measureSessions, 10_000)
+    expect(sessions[0]!.portfolio.orders).toHaveLength(800)
+    expect(sessions[0]!.portfolio.equityCurve).toHaveLength(500)
   })
 })
