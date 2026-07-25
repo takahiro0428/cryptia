@@ -9,16 +9,18 @@ import { useSolanaStore } from '~/stores/solana'
  * 保有ポジションのその場詳細パネル（F-05/F-06）。
  * ポジション行のタップで展開され、ページ遷移せずにトークンの詳細
  * （価格・エントリー価格・損益・流動性・ラダー進捗・監査判定・CA）を確認できる。
+ * 複数セッション対応のため、対象セッションを sessionId で指定する。
  */
-const props = defineProps<{ pairAddress: string }>()
+const props = defineProps<{ sessionId: string; pairAddress: string }>()
 
 const solana = useSolanaStore()
 
+const session = computed(() => solana.sessionById(props.sessionId))
 const token = computed(() => solana.tokenOf(props.pairAddress))
 const position = computed(() =>
-  solana.portfolio ? positionOf(solana.portfolio, props.pairAddress) : undefined,
+  session.value ? positionOf(session.value.portfolio, props.pairAddress) : undefined,
 )
-const meta = computed(() => solana.positionMeta[props.pairAddress])
+const meta = computed(() => session.value?.positionMeta[props.pairAddress])
 
 const priceUsd = computed(() => token.value?.priceUsd ?? position.value?.avgCostUsd ?? 0)
 const valueUsd = computed(() => (position.value?.quantity ?? 0) * priceUsd.value)
@@ -41,12 +43,12 @@ const VERDICT = SNIPE_VERDICT_LABELS
  * AI 手法は買い増しで平均取得単価が動くため、損益の基準である平均取得単価を表示する。
  * ラダー系（1 トークン 1 回の等分エントリー）は初回エントリー価格 = 平均取得単価。
  */
-const isAiMethod = computed(() => solana.method === 'ai')
+const isAiMethod = computed(() => session.value?.method === 'ai')
 
 /** 未発動のラダーライン（エントリー価格基準の目標価格つき） */
 const ladderLines = computed(() => {
-  if (!meta.value || isAiMethod.value) return []
-  return solana.ladderRules
+  if (!meta.value || !session.value || isAiMethod.value) return []
+  return session.value.ladderRules
     .map((rule, index) => ({
       rule,
       index,

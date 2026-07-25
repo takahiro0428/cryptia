@@ -44,19 +44,19 @@ describe('シナリオ: 戦略設定 → デモトレード → アーカイブ'
     // UC-4: デモトレード開始（ロジックエンジン）
     const demo = useDemoTradeStore()
     demo.start(10_000, ['bitcoin', 'ethereum', 'solana'], 'logic')
-    expect(demo.portfolio).not.toBeNull()
-    expect(demo.running).toBe(true)
+    expect(demo.sessions).toHaveLength(1)
+    const sessionId = demo.sessions[0].id
+    expect(demo.sessions[0].running).toBe(true)
 
     // ティックを直接実行（タイマー非依存）
     await demo.tick()
     await demo.tick()
-    expect(demo.portfolio!.equityCurve.length).toBeGreaterThan(1)
-    const ordersAfterTicks = demo.portfolio!.orders.length
+    expect(demo.sessions[0].portfolio.equityCurve.length).toBeGreaterThan(1)
+    const ordersAfterTicks = demo.sessions[0].portfolio.orders.length
 
     // セッション終了 → アーカイブへ（注文があれば保護される）
-    demo.endSession()
-    expect(demo.portfolio).toBeNull()
-    expect(demo.running).toBe(false)
+    demo.endSession(sessionId)
+    expect(demo.sessions).toHaveLength(0)
     if (ordersAfterTicks > 0) {
       expect(demo.archives).toHaveLength(1)
       expect(demo.archives[0].summary.tradeCount).toBe(ordersAfterTicks)
@@ -70,20 +70,46 @@ describe('シナリオ: 戦略設定 → デモトレード → アーカイブ'
     const archiveCount = demo.archives.length
     demo.start(5_000, ['solana'], 'logic')
     expect(demo.archives.length).toBe(archiveCount)
-    demo.stop()
+    demo.pause(demo.sessions[0].id)
 
     vi.unstubAllGlobals()
   })
 
-  it('多重開始はブロックされ、既存セッションが破壊されない（冪等性）', async () => {
+  it('複数セッションを同時に実行でき、個別に一時停止・終了できる', async () => {
     const market = useMarketStore()
     await market.fetchTickers()
     const demo = useDemoTradeStore()
-    demo.start(10_000, ['bitcoin'], 'logic')
-    const firstPortfolio = demo.portfolio
-    demo.start(99_999, ['ethereum'], 'logic') // 2回目は無視される
-    expect(demo.portfolio).toBe(firstPortfolio)
-    demo.stop()
+    demo.start(10_000, ['bitcoin'], 'logic', 'A')
+    demo.start(5_000, ['ethereum'], 'logic', 'B')
+    expect(demo.sessions).toHaveLength(2)
+    expect(demo.anyRunning).toBe(true)
+
+    const [a, b] = demo.sessions
+    // ティックは両セッションを処理する
+    await demo.tick()
+    expect(demo.sessionById(a.id)).toBeTruthy()
+    expect(demo.sessionById(b.id)).toBeTruthy()
+
+    // A を一時停止しても B は実行中のまま
+    demo.pause(a.id)
+    expect(demo.sessionById(a.id)!.running).toBe(false)
+    expect(demo.sessionById(b.id)!.running).toBe(true)
+
+    // B を終了しても A は残る
+    demo.endSession(b.id)
+    expect(demo.sessions).toHaveLength(1)
+    expect(demo.sessions[0].id).toBe(a.id)
+    demo.endSession(a.id)
+    vi.unstubAllGlobals()
+  })
+
+  it('セッション数の上限を超える開始はブロックされる', async () => {
+    const market = useMarketStore()
+    await market.fetchTickers()
+    const demo = useDemoTradeStore()
+    for (let i = 0; i < 6; i++) demo.start(1_000, ['bitcoin'], 'logic')
+    expect(demo.sessions.length).toBeLessThanOrEqual(5)
+    for (const s of [...demo.sessions]) demo.endSession(s.id)
     vi.unstubAllGlobals()
   })
 
