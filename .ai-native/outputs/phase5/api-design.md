@@ -53,7 +53,7 @@
 | API | 内容 | キャッシュ |
 |-----|------|-----------|
 | GET `/api/market/tickers` | CoinGecko `/coins/markets` の中継（対象銘柄はサーバー側の銘柄マスタで固定） | 30s |
-| GET `/api/solana/screen` | DexScreener 検索の中継（Solana ペアのみ返す） | 20s |
+| GET `/api/solana/screen` | スクリーニング用 Solana ペアの**多ソース収集**（search + token-boosts + token-profiles → tokens 解決、pairAddress で重複排除。search 単独では Solana ペアが空になる本番事象への対策）。全ソース空は 502 扱いで空リストをキャッシュしない | 20s |
 | GET `/api/solana/pairs?addrs=` | 保有ペアの価格中継。addrs は base58・1〜30 件を検証（400 `CRYPTIA-E301`） | 8s |
 | GET `/api/solana/fresh` | 新規上場（48h 以内）発見 + シグナル収集（F-06 スナイプ）。token-profiles → 代表ペア解決 → Solana RPC `getMultipleAccounts`（mint/freeze 権限）→ 同名再発行照合。スコアリングは shared/snipeScoring.ts でクライアントと共通 | 90s |
 | POST `/api/solana/rpc` | Solana RPC の読み取り専用中継（宛先固定・許可メソッドは `getBalance`/`getTokenAccountsByOwner` のみ・アドレス検証あり）。署名/送信系メソッドは一切許可しない（BR-1） | なし（IP クォータ + 上流バジェット rpc 30/分で保護） |
@@ -65,7 +65,7 @@
 | API | 用途 | 認証 | 障害時 |
 |-----|------|------|--------|
 | CoinGecko `/coins/markets` | 価格・時価総額・出来高・スパークライン（15s ポーリング） | 不要 | `/api/market/tickers` プロキシ → 最終キャッシュ → モック（警告表示） |
-| DexScreener `/latest/dex/search`・`/latest/dex/pairs`・`/token-profiles`・`/latest/dex/tokens` | Solana ペアのスクリーニング・保有ペア追跡（10s 表示更新）・新規上場発見 | 不要 | `/api/solana/*` プロキシ → モック（警告 + 再試行ボタン） |
+| DexScreener `/latest/dex/search`・`/latest/dex/pairs`・`/token-profiles`・`/token-boosts`・`/latest/dex/tokens` | Solana ペアの多ソーススクリーニング・保有ペア追跡（10s 表示更新）・新規上場発見 | 不要 | 内容 0 件も失敗扱いで `/api/solana/*` プロキシ → モック（警告 + 再試行ボタン） |
 | Jupiter `/v6/quote`・`/v6/swap` | スワップ見積り・未署名 Tx 生成 | 不要 | `CRYPTIA-E504` 通知・注文中断 |
 | Solana RPC `getBalance` | ウォレット残高 | 不要 | 表示のみ劣化 |
 

@@ -6,7 +6,7 @@
 | コード | 意味 | 主な原因 | ユーザー影響 | 対処 |
 |--------|------|---------|-------------|------|
 | CRYPTIA-E101 | 価格 API 取得失敗 | CoinGecko 障害・レートリミット・オフライン | 最終キャッシュ or モック表示（警告バナー） | 直接取得失敗時はサーバープロキシ（`/api/market/tickers`）へ自動フォールバック。その上で失敗時は自動リトライ（15s 間隔）。頻発時は CoinGecko ステータス確認 |
-| CRYPTIA-E102 | DEX API 取得失敗 | DexScreener 障害・クライアント側ネットワーク遮断（企業 NW・広告ブロッカー） | Solana リストがモック表示（価格・損益は更新停止） | 直接取得失敗時はサーバープロキシ（`/api/solana/screen` / `pairs` / `fresh`）へ自動フォールバック。バナーの「再試行」で手動再接続も可能。プロキシ側でも失敗する場合は DexScreener ステータス確認 |
+| CRYPTIA-E102 | DEX API 取得失敗 | DexScreener 障害・クライアント側ネットワーク遮断（企業 NW・広告ブロッカー）・**接続成功でも応答に Solana ペアが含まれない**（search の応答構成変化・改変応答） | Solana リストがモック表示（価格・損益は更新停止） | トークン収集は search + token-boosts + token-profiles の多ソースで補完。直接取得は transport 成功でも**内容 0 件なら失敗**としてサーバープロキシ（`/api/solana/screen` / `pairs` / `fresh` / `rpc`）へ自動フォールバック。バナーの「再試行」で手動再接続も可能。プロキシ側でも失敗する場合は DexScreener ステータス確認 |
 | CRYPTIA-E103 | ニュース取得失敗 | RSS 障害・ネットワーク | AI はテクニカルのみで分析継続 | 5 分キャッシュ経由で自動回復 |
 | CRYPTIA-E201 | Vertex AI 呼び出し失敗 | 認証・API 無効・タイムアウト | フォールバック分析に自動切替（engine:'fallback' 表示） | Functions SA の `roles/aiplatform.user` 権限、`NUXT_GCP_PROJECT_ID` 設定を確認 |
 | CRYPTIA-E202 | AI 応答の解析失敗 | Gemini の JSON 逸脱 | 同上 | 頻発時はモデル/プロンプト見直し（`NUXT_VERTEX_MODEL`） |
