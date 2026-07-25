@@ -19,7 +19,13 @@ import { useMarketStore } from '~/stores/market'
 import { useSolanaStore } from '~/stores/solana'
 import { useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
-import { useWalletStore, LAMPORTS_PER_SOL, SOL_MINT, type JupiterQuote } from '~/stores/wallet'
+import {
+  useWalletStore,
+  LAMPORTS_PER_SOL,
+  SOL_MINT,
+  type JupiterQuote,
+  type WalletOption,
+} from '~/stores/wallet'
 
 // 実トレード（UC-6 / F-07, F-08）。買い（SOL→トークン）と売り（トークン→SOL）に対応
 const wallet = useWalletStore()
@@ -191,7 +197,7 @@ async function askAi() {
       method: 'POST',
       body: {
         token: pick.token,
-        strategy: strategy.activeDoc,
+        strategy: strategy.docFor('live'),
         exposureRatio: 0,
         unrealizedPct: null,
         library: strategy.allDocs.slice(0, 10),
@@ -238,7 +244,20 @@ async function importLog(e: Event) {
   if (importInput.value) importInput.value.value = ''
 }
 
+/**
+ * 検出済みウォレット（Phantom / Bitget Wallet / Solflare / 汎用 injected）。
+ * 拡張・アプリ内ブラウザの provider 注入はページ読込より遅れることがあるため、
+ * 未接続の間は定期的に再検出する。
+ */
+const detectedWallets = ref<WalletOption[]>([])
+let detectTimer: ReturnType<typeof setInterval> | null = null
+function refreshDetectedWallets() {
+  if (!wallet.connected) detectedWallets.value = wallet.detectWallets()
+}
+
 onMounted(async () => {
+  refreshDetectedWallets()
+  detectTimer = setInterval(refreshDetectedWallets, 2_000)
   await strategy.restoreState()
   await wallet.restoreState()
   await solana.restoreState()
@@ -247,6 +266,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   if (nowTimer) clearInterval(nowTimer)
+  if (detectTimer) clearInterval(detectTimer)
 })
 useHead({ title: '実トレード | Cryptia' })
 </script>
@@ -274,34 +294,55 @@ useHead({ title: '実トレード | Cryptia' })
     <section class="card">
       <div class="card-title">
         <h2><Wallet :size="17" class="icon-inline" aria-hidden="true" />ウォレット</h2>
-        <span v-if="wallet.connected" class="badge badge-up">接続中</span>
+        <span v-if="wallet.connected" class="badge badge-up">{{ wallet.walletName || '接続中' }}</span>
       </div>
       <template v-if="!wallet.connected">
         <p class="small dim">
-          Phantom ウォレットを接続すると Jupiter アグリゲーター経由で実際のスワップを実行できます。
+          ウォレットを接続すると Jupiter アグリゲーター経由で実際のスワップを実行できます。
           秘密鍵がアプリに渡ることはなく、署名はウォレット内で完結します。
+          対応: Phantom / Bitget Wallet / Solflare / その他 Phantom 互換ウォレット。
         </p>
-        <button class="btn btn-primary" type="button" @click="wallet.connect()">
-          <Wallet :size="15" aria-hidden="true" /> Phantom を接続
-        </button>
-        <p v-if="!wallet.hasPhantom" class="xs warn" style="margin-top: 8px">
-          Phantom が検出されていません。拡張機能のインストール、またはスマホは Phantom アプリ内ブラウザでこのページを開いてください。
+        <div class="chips">
+          <button
+            v-for="w in detectedWallets"
+            :key="w.id"
+            class="btn btn-primary"
+            type="button"
+            @click="wallet.connect(w.id)"
+          >
+            <Wallet :size="15" aria-hidden="true" /> {{ w.name }} を接続
+          </button>
+        </div>
+        <p v-if="detectedWallets.length === 0" class="xs warn" style="margin-top: 8px">
+          ウォレットが検出されていません。PC はブラウザ拡張（Phantom / Bitget Wallet / Solflare）をインストールし、
+          スマホは各ウォレットアプリ内のブラウザ（DApp ブラウザ）でこのページを開いてください。
         </p>
       </template>
       <template v-else>
         <div class="small mono dim" style="word-break: break-all">{{ wallet.publicKey }}</div>
         <div style="display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap">
           <span class="mono bold" style="font-size: 1.1rem">
-            {{ wallet.solBalance !== null ? `${wallet.solBalance.toFixed(4)} SOL` : '残高取得中…' }}
+            <template v-if="wallet.solBalance !== null">{{ wallet.solBalance.toFixed(4) }} SOL</template>
+            <template v-else-if="wallet.balanceLoading">残高取得中…</template>
+            <template v-else>— SOL</template>
           </span>
           <span v-if="wallet.solBalance !== null && solPriceUsd > 0" class="dim small">
             ≈ {{ fmtUsd(wallet.solBalance * solPriceUsd) }}
           </span>
-          <button class="btn btn-sm" type="button" aria-label="残高を更新" @click="wallet.refreshBalance()">
+          <button
+            class="btn btn-sm"
+            type="button"
+            aria-label="残高を更新"
+            :disabled="wallet.balanceLoading"
+            @click="wallet.refreshBalance()"
+          >
             <RefreshCw :size="14" aria-hidden="true" />
           </button>
           <button class="btn btn-sm btn-ghost" type="button" @click="wallet.disconnect()">切断</button>
         </div>
+        <p v-if="wallet.balanceError && !wallet.balanceLoading" class="xs warn" style="margin-top: 6px">
+          残高を取得できませんでした（CRYPTIA-E505: RPC の混雑・遮断の可能性）。更新ボタンで再試行してください。取引時には残高が再検証されるため、表示が取れなくても資産は安全です。
+        </p>
       </template>
     </section>
 
@@ -358,6 +399,7 @@ useHead({ title: '実トレード | Cryptia' })
     <!-- 注文パネル -->
     <section class="card">
       <h2>スワップ注文</h2>
+      <StrategyPicker context="live" />
       <div class="tabs" style="max-width: 320px; margin-bottom: 12px" role="tablist">
         <button class="tab" :class="{ active: direction === 'buy' }" role="tab" :aria-selected="direction === 'buy'" type="button" @click="direction = 'buy'; quote = null">
           買う（SOL → トークン）
@@ -495,7 +537,7 @@ useHead({ title: '実トレード | Cryptia' })
             <tr><td class="dim">スリッページ許容</td><td class="mono">1.0%</td></tr>
           </tbody>
         </table>
-        <p class="xs warn">この後 Phantom の署名確認が表示されます。内容を必ず確認してください。</p>
+        <p class="xs warn">この後 {{ wallet.walletName || 'ウォレット' }} の署名確認が表示されます。内容を必ず確認してください。</p>
         <div style="display: flex; gap: 8px">
           <button class="btn btn-danger" type="button" :disabled="wallet.busy" @click="confirmSwap">
             {{ wallet.busy ? '送信中…' : '署名して実行' }}

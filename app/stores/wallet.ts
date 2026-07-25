@@ -50,7 +50,7 @@ export interface JupiterQuote {
   routePlan?: unknown[]
 }
 
-interface PhantomProvider {
+interface SolanaProvider {
   isPhantom?: boolean
   publicKey: { toString(): string } | null
   connect(opts?: { onlyIfTrusted?: boolean }): Promise<{ publicKey: { toString(): string } }>
@@ -58,10 +58,67 @@ interface PhantomProvider {
   signAndSendTransaction(tx: unknown): Promise<{ signature: string }>
 }
 
-function getPhantom(): PhantomProvider | null {
-  const w = globalThis as unknown as { solana?: PhantomProvider }
-  return w.solana?.isPhantom ? w.solana : null
+export interface WalletOption {
+  id: string
+  name: string
 }
+
+/**
+ * 対応ウォレットの検出定義（Phantom 互換の injected provider API）。
+ * - Phantom: window.phantom.solana（旧: window.solana + isPhantom）
+ * - Bitget Wallet（旧 BitKeep）: window.bitkeep.solana
+ * - Solflare: window.solflare
+ * - その他: window.solana に注入する Phantom 互換ウォレットを汎用検出
+ */
+const WALLET_DETECTORS: { id: string; name: string; get: () => SolanaProvider | null }[] = [
+  {
+    id: 'phantom',
+    name: 'Phantom',
+    get: () => {
+      const w = globalThis as unknown as {
+        phantom?: { solana?: SolanaProvider }
+        solana?: SolanaProvider
+      }
+      return w.phantom?.solana ?? (w.solana?.isPhantom ? w.solana : null)
+    },
+  },
+  {
+    id: 'bitget',
+    name: 'Bitget Wallet',
+    get: () => {
+      const w = globalThis as unknown as { bitkeep?: { solana?: SolanaProvider } }
+      return typeof w.bitkeep?.solana?.connect === 'function' ? w.bitkeep.solana : null
+    },
+  },
+  {
+    id: 'solflare',
+    name: 'Solflare',
+    get: () => {
+      const w = globalThis as unknown as { solflare?: SolanaProvider & { isSolflare?: boolean } }
+      return w.solflare?.isSolflare ? w.solflare : null
+    },
+  },
+  {
+    id: 'injected',
+    name: '検出されたウォレット',
+    get: () => {
+      const w = globalThis as unknown as {
+        solana?: SolanaProvider
+        bitkeep?: { solana?: SolanaProvider }
+        solflare?: unknown
+      }
+      // 上のいずれかで検出済みのプロバイダは重複表示しない
+      if (!w.solana || w.solana.isPhantom) return null
+      if (w.bitkeep?.solana === w.solana || (w.solflare as unknown) === w.solana) return null
+      return typeof w.solana.connect === 'function' ? w.solana : null
+    },
+  },
+]
+
+/** 接続中のプロバイダ。外部オブジェクトのため reactive state には入れない（Vue Proxy 安全性） */
+let activeProvider: SolanaProvider | null = null
+/** RPC の取得経路。直接取得に失敗したらプロキシへ sticky 切替（自己回復つき） */
+let rpcVia: 'direct' | 'proxy' = 'direct'
 
 /**
  * 取引レコードの厳格検証（AUDIT-11）。
@@ -89,7 +146,7 @@ function isValidTradeRecord(t: unknown): t is LiveTradeRecord {
 
 /**
  * ウォレット接続・実トレードストア（UC-6 / F-07, F-08）。
- * - 秘密鍵は一切保持しない。署名は Phantom ウォレット内で完結（BR-1）
+ * - 秘密鍵は一切保持しない。署名はウォレット（Phantom / Bitget Wallet / Solflare 等）内で完結（BR-1）
  * - 取引はリスク同意 + 上限設定のガードを通過した場合のみ（BR-2）
  * - 取引ログは追記型で保存（BR-7）
  */
@@ -97,7 +154,12 @@ export const useWalletStore = defineStore('wallet', {
   state: () => ({
     connected: false,
     publicKey: '' as string,
+    /** 接続中ウォレットの表示名（Phantom / Bitget Wallet 等） */
+    walletName: '' as string,
     solBalance: null as number | null,
+    balanceLoading: false,
+    /** 残高取得の失敗理由（「取得中」のまま固まらせない: 本番障害対応） */
+    balanceError: '' as string,
     /** SPL トークン残高（売り方向スワップの入力候補） */
     tokenBalances: [] as TokenBalance[],
     guard: { ...DEFAULT_GUARD } as TradeGuardConfig,
@@ -106,7 +168,6 @@ export const useWalletStore = defineStore('wallet', {
     restored: false,
   }),
   getters: {
-    hasPhantom: () => getPhantom() !== null,
     canAutoTrade(state): boolean {
       return canEnableAutoTrade(state.guard) && state.guard.autoTradeEnabled
     },
@@ -126,23 +187,40 @@ export const useWalletStore = defineStore('wallet', {
       if (Array.isArray(log)) this.tradeLog = log.filter(isValidTradeRecord)
       this.restored = true
     },
-    async connect() {
+    /** 検出済みウォレットの一覧（画面側から定期的に呼ぶ。拡張の注入は遅延することがある） */
+    detectWallets(): WalletOption[] {
+      const seen = new Set<SolanaProvider>()
+      const options: WalletOption[] = []
+      for (const d of WALLET_DETECTORS) {
+        const provider = d.get()
+        if (!provider || seen.has(provider)) continue
+        seen.add(provider)
+        options.push({ id: d.id, name: d.name })
+      }
+      return options
+    },
+    async connect(walletId?: string) {
       const ui = useUiStore()
-      const phantom = getPhantom()
-      if (!phantom) {
+      const detector = walletId
+        ? WALLET_DETECTORS.find((d) => d.id === walletId)
+        : WALLET_DETECTORS.find((d) => d.get() !== null)
+      const provider = detector?.get() ?? null
+      if (!detector || !provider) {
         ui.notify(
-          'Phantom ウォレットが見つかりません。ブラウザ拡張または Phantom アプリ内ブラウザでご利用ください',
+          '対応ウォレット（Phantom / Bitget Wallet / Solflare 等）が見つかりません。ブラウザ拡張を導入するか、各ウォレットアプリ内のブラウザでこのページを開いてください',
           'warn',
           ERROR_CODES.WALLET_NOT_CONNECTED,
         )
         return
       }
       try {
-        const res = await phantom.connect()
+        const res = await provider.connect()
+        activeProvider = provider
+        this.walletName = detector.name
         this.publicKey = res.publicKey.toString()
         this.connected = true
         await this.refreshBalance()
-        ui.notify('ウォレットを接続しました')
+        ui.notify(`${detector.name} を接続しました`)
       } catch {
         ui.notifyError(
           new CryptiaError(ERROR_CODES.WALLET_NOT_CONNECTED, 'ウォレット接続がキャンセルまたは失敗しました'),
@@ -152,34 +230,67 @@ export const useWalletStore = defineStore('wallet', {
     },
     async disconnect() {
       try {
-        await getPhantom()?.disconnect()
+        await activeProvider?.disconnect()
       } finally {
+        activeProvider = null
         this.connected = false
         this.publicKey = ''
+        this.walletName = ''
         this.solBalance = null
+        this.balanceError = ''
         // 前ウォレットの残高が売りタブに残らないようクリア（ISSUE-P8-7）
         this.tokenBalances = []
       }
     },
+    /**
+     * Solana RPC 呼び出し（直接 → 失敗時は自アプリの読み取り専用プロキシへフォールバック）。
+     * 公開 RPC はブラウザ発リクエストを遮断することがあり、残高が「取得中」のまま
+     * 固まる本番障害の原因になった。プロキシも失敗したら次回は直接から再試行（自己回復）。
+     */
+    async _rpc<T>(method: 'getBalance' | 'getTokenAccountsByOwner', params: unknown[]): Promise<T> {
+      const body = { jsonrpc: '2.0', id: 1, method, params }
+      if (rpcVia === 'direct') {
+        try {
+          const res = await fetch(SOLANA_RPC, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(8_000),
+          })
+          if (!res.ok) throw new Error(`RPC HTTP ${res.status}`)
+          return (await res.json()) as T
+        } catch {
+          const data = await $fetch<T>('/api/solana/rpc', { method: 'POST', body, timeout: 12_000 })
+          rpcVia = 'proxy'
+          return data
+        }
+      }
+      try {
+        return await $fetch<T>('/api/solana/rpc', { method: 'POST', body, timeout: 12_000 })
+      } catch (err) {
+        rpcVia = 'direct'
+        throw err
+      }
+    },
     async refreshBalance() {
       if (!this.publicKey) return
+      this.balanceLoading = true
       try {
-        const res = await fetch(SOLANA_RPC, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'getBalance',
-            params: [this.publicKey],
-          }),
-        })
-        const data = (await res.json()) as { result?: { value?: number } }
-        if (typeof data.result?.value === 'number') {
-          this.solBalance = data.result.value / LAMPORTS_PER_SOL
+        const data = await this._rpc<{ result?: { value?: number }; error?: { message?: string } }>(
+          'getBalance',
+          [this.publicKey],
+        )
+        if (typeof data.result?.value !== 'number') {
+          throw new Error(data.error?.message ?? 'RPC の応答に残高が含まれていません')
         }
-      } catch {
-        /* 残高取得失敗は表示のみの問題。取引時に再検証される（原則4） */
+        this.solBalance = data.result.value / LAMPORTS_PER_SOL
+        this.balanceError = ''
+      } catch (err) {
+        // 無限「取得中…」にせず、明示的なエラー + 再試行導線にする（本番障害対応）
+        this.balanceError = err instanceof Error ? err.message : String(err)
+        console.warn(`[${ERROR_CODES.BALANCE_FETCH_FAILED}] 残高取得失敗: ${this.balanceError}`)
+      } finally {
+        this.balanceLoading = false
       }
       void this.fetchTokenBalances()
     },
@@ -206,19 +317,12 @@ export const useWalletStore = defineStore('wallet', {
           }[]
         }
       }
-      const queryProgram = async (programId: string): Promise<RpcTokenAccounts> => {
-        const res = await fetch(SOLANA_RPC, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 2,
-            method: 'getTokenAccountsByOwner',
-            params: [this.publicKey, { programId }, { encoding: 'jsonParsed' }],
-          }),
-        })
-        return (await res.json()) as RpcTokenAccounts
-      }
+      const queryProgram = (programId: string): Promise<RpcTokenAccounts> =>
+        this._rpc<RpcTokenAccounts>('getTokenAccountsByOwner', [
+          this.publicKey,
+          { programId },
+          { encoding: 'jsonParsed' },
+        ])
       try {
         const results = await Promise.allSettled([
           queryProgram(TOKEN_PROGRAM_ID),
@@ -295,7 +399,7 @@ export const useWalletStore = defineStore('wallet', {
       return this.getQuoteRaw(SOL_MINT, outputMint, String(amountLamports), slippageBps)
     },
     /**
-     * スワップ実行（署名は Phantom 内・買い/売り両方向対応）。
+     * スワップ実行（署名は接続中ウォレット内・買い/売り両方向対応）。
      * @param meta.side buy = SOL→トークン / sell = トークン→SOL
      * @param meta.amountSol SOL 数量（買い=支払額 / 売り=受取見込み額）
      * @param meta.approxUsd ガード判定用の概算 USD（SOL 価格換算）
@@ -312,8 +416,8 @@ export const useWalletStore = defineStore('wallet', {
       },
     ): Promise<string> {
       const ui = useUiStore()
-      const phantom = getPhantom()
-      if (!phantom || !this.connected || !this.publicKey) {
+      const provider = activeProvider
+      if (!provider || !this.connected || !this.publicKey) {
         throw new CryptiaError(ERROR_CODES.WALLET_NOT_CONNECTED, 'ウォレットが接続されていません', false)
       }
       // 並行実行ガード: 署名待ちの間の重複注文で日次上限の判定が古くなるのを防ぐ（AUDIT-7）
@@ -353,7 +457,7 @@ export const useWalletStore = defineStore('wallet', {
         const { VersionedTransaction } = await import('@solana/web3.js')
         const txBytes = Uint8Array.from(atob(data.swapTransaction), (c) => c.charCodeAt(0))
         const tx = VersionedTransaction.deserialize(txBytes)
-        const { signature } = await phantom.signAndSendTransaction(tx)
+        const { signature } = await provider.signAndSendTransaction(tx)
 
         // 取引ログは追記のみ（BR-7）
         this.tradeLog = [

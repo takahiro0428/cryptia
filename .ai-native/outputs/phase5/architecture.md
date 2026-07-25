@@ -23,7 +23,7 @@ flowchart TB
         RSSF["CoinDesk / Cointelegraph RSS"]
     end
     FS[(Firestore<br/>cryptia-users/{uid}/state)]
-    Wallet["Phantom Wallet"]
+    Wallet["ウォレット<br/>Phantom / Bitget / Solflare"]
 
     Stores -->|直接fetch| CG
     Stores --> DS
@@ -40,7 +40,7 @@ flowchart TB
 | レイヤー | 責務 | 障害時の振る舞い（BR-5） |
 |---------|------|------------------------|
 | `shared/` | 型・エラーコード・テクニカル指標・フロー推定・売買判断・取引エンジン・スコアリング（純関数） | — （外部依存なし。全テストの主対象） |
-| `stores/` | 状態管理・外部 API フェッチ・永続化・ティック実行 | 価格→モック/最終キャッシュ、AI→ローカルロジック、DEX→モック |
+| `stores/` | 状態管理・外部 API フェッチ・永続化・ティック実行 | 価格/DEX/RPC→サーバープロキシへ自動フォールバック→モック/最終キャッシュ、AI→ローカルロジック |
 | `server/api` | AI キー秘匿・入力検証・ニュース収集・Gemini 呼び出し | Vertex 失敗→`shared/advisor` フォールバック |
 | `composables/` | Firebase 遅延初期化・ローカル/リモート永続化 | Firebase 未設定→ローカルのみで全機能動作 |
 
@@ -50,7 +50,7 @@ flowchart TB
    オフラインでもデモトレードが完全動作し、テストは外部依存なしで全パスを検証できる。
 2. **AI 呼び出しはサーバー経由のみ:** Vertex AI の認証情報（ADC）はクライアントに一切露出しない。
    クライアントからの入力は `validation.ts` で全件検証（銘柄マスタ・数値範囲・文字列長）。
-3. **秘密鍵非保持（BR-1）:** ウォレット署名は Phantom 内で完結。アプリは未署名 Tx の生成までしか行わない。
+3. **秘密鍵非保持（BR-1）:** ウォレット署名は接続中ウォレット（Phantom / Bitget Wallet / Solflare 等）内で完結。アプリは未署名 Tx の生成までしか行わない。
 4. **追記型データ（BR-7）:** 注文・取引ログ・アーカイブは追記のみ。エンジンは immutable 更新で
    巻き戻しバグを構造的に防止する。
 5. **SoT 宣言（原則6）:** ユーザーデータの SoT はクライアント操作結果（ローカルストレージ）。

@@ -25,7 +25,7 @@ const MENUS = [
     to: '/trade/live',
     icon: markRaw(Zap),
     title: '実トレード',
-    desc: 'Phantom ウォレットを接続し、Jupiter 経由で実際のスワップを実行。AI 自動化はリスク同意と上限設定後のみ。',
+    desc: 'ウォレット（Phantom / Bitget Wallet / Solflare 等）を接続し、Jupiter 経由で実際のスワップを実行。AI 自動化はリスク同意と上限設定後のみ。',
     badge: '実資金',
     badgeCls: 'badge-warn',
   },

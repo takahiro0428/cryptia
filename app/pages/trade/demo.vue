@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { Bot, FlaskConical, Pause, Play, Square } from '@lucide/vue'
+import { Bot, ChevronDown, ChevronUp, FlaskConical, Pause, Play, Square } from '@lucide/vue'
 import { ASSET_MAP, ASSETS } from '~/shared/assets'
-import { fmtPct, fmtQty, fmtTime, fmtUsd } from '~/shared/format'
+import { fmtAgo, fmtPct, fmtQty, fmtTime, fmtUsd } from '~/shared/format'
 import { useDemoTradeStore, type EngineMode } from '~/stores/demoTrade'
 import { useMarketStore } from '~/stores/market'
 import { useStrategyStore } from '~/stores/strategy'
@@ -38,9 +38,16 @@ function startSession() {
 
 /** セッション終了の誤タップ防止（実行中の自動売買が止まりアーカイブへ移るため確認を挟む） */
 function confirmEndSession() {
-  if (window.confirm('セッションを終了しますか？\n実行中の自動売買が停止し、結果はアーカイブに保存されます。')) {
+  if (window.confirm('セッションを終了しますか？\n実行中の自動売買が停止し、結果は過去セッション（約定履歴つき）に保存されます。')) {
     demo.endSession()
+    expandedArchive.value = null
   }
+}
+
+/** 展開中の過去セッション（約定履歴の閲覧: F-04） */
+const expandedArchive = ref<number | null>(null)
+function toggleArchive(i: number) {
+  expandedArchive.value = expandedArchive.value === i ? null : i
 }
 
 const equityValues = computed(() => demo.portfolio?.equityCurve.map((p) => p.equityUsd) ?? [])
@@ -89,7 +96,7 @@ useHead({ title: 'デモトレード | Cryptia' })
       </div>
 
       <div class="field">
-        <span class="small dim">適用戦略: <b>{{ strategy.activeDoc.name }}</b>（<NuxtLink to="/strategy">変更</NuxtLink>）</span>
+        <StrategyPicker context="demo" />
       </div>
 
       <div class="field">
@@ -157,9 +164,14 @@ useHead({ title: 'デモトレード | Cryptia' })
           </div>
           <div>
             <div class="xs faint">エンジン</div>
-            <div class="small">{{ demo.engineMode === 'ai' ? 'AI (Vertex)' : 'ロジック' }} / {{ strategy.activeDoc.name }}</div>
+            <div class="small">{{ demo.engineMode === 'ai' ? 'AI (Vertex)' : 'ロジック' }} / {{ strategy.docFor('demo').name }}</div>
           </div>
         </div>
+        <p class="xs faint" style="margin: 0 0 8px">
+          <span v-if="market.streaming" class="badge badge-up" style="margin-right: 6px">価格 LIVE</span>
+          <template v-if="market.usingMockData">価格 API に接続できないため参考データ表示中（損益は更新されません）</template>
+          <template v-else-if="market.lastUpdatedAt">価格更新: {{ fmtAgo(market.lastUpdatedAt) }}（損益はリアルタイム反映）</template>
+        </p>
         <PriceChart v-if="equityValues.length >= 2" :values="equityValues" color="#22c58b" />
         <div class="controls">
           <button v-if="demo.running" class="btn" type="button" @click="demo.stop()">
@@ -197,17 +209,32 @@ useHead({ title: 'デモトレード | Cryptia' })
       </section>
     </template>
 
-    <!-- 過去セッションのアーカイブ（記録は巻き戻さない: BR-7） -->
+    <!-- 過去セッションのアーカイブ（記録は巻き戻さない: BR-7。タップで約定履歴を展開: F-04） -->
     <section v-if="demo.archives.length > 0" class="card">
       <h2>過去セッション</h2>
-      <div v-for="(a, i) in demo.archives" :key="i" class="archive-row small">
-        <span class="xs faint nowrap">{{ fmtTime(a.endedAt) }}</span>
-        <span>{{ a.strategyName }}</span>
-        <span class="dim xs">{{ a.assetIds.map((id) => ASSET_MAP[id]?.symbol ?? id).join(' ') }}</span>
-        <span class="mono" :class="a.summary.totalPnlUsd >= 0 ? 'up' : 'down'">
-          {{ fmtPct(a.summary.totalPnlPct) }}
-        </span>
-        <span class="mono xs dim">{{ a.summary.tradeCount }}回 勝率{{ a.summary.winRatePct.toFixed(0) }}%</span>
+      <p class="xs faint">行をタップすると、そのセッションの約定履歴を表示します。</p>
+      <div v-for="(a, i) in demo.archives" :key="a.endedAt">
+        <button
+          class="archive-row small"
+          type="button"
+          :aria-expanded="expandedArchive === i"
+          @click="toggleArchive(i)"
+        >
+          <span class="xs faint nowrap">{{ fmtTime(a.endedAt) }}</span>
+          <span>{{ a.strategyName }}</span>
+          <span class="dim xs symbols">{{ a.assetIds.map((id) => ASSET_MAP[id]?.symbol ?? id).join(' ') }}</span>
+          <span class="mono" :class="a.summary.totalPnlUsd >= 0 ? 'up' : 'down'">
+            {{ fmtPct(a.summary.totalPnlPct) }}
+          </span>
+          <span class="mono xs dim">{{ a.summary.tradeCount }}回 勝率{{ a.summary.winRatePct.toFixed(0) }}%</span>
+          <component :is="expandedArchive === i ? ChevronUp : ChevronDown" :size="15" class="dim" aria-hidden="true" />
+        </button>
+        <div v-if="expandedArchive === i" class="archive-detail">
+          <OrderList v-if="a.orders && a.orders.length > 0" :orders="a.orders" :limit="100" />
+          <p v-else class="dim small" style="padding: 8px 0">
+            このセッションの約定明細は保存されていません（履歴保存機能の追加前、または容量保護で明細を省略した古い記録です。サマリーのみ閲覧できます）。
+          </p>
+        </div>
       </div>
     </section>
   </div>
@@ -247,6 +274,24 @@ useHead({ title: 'デモトレード | Cryptia' })
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-.pos-row:last-child, .archive-row:last-child { border-bottom: none; }
+.pos-row:last-child { border-bottom: none; }
 .pos-row span:last-child { margin-left: auto; }
+.archive-row {
+  width: 100%;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  padding: 8px 0;
+}
+.archive-row .symbols { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 60px; }
+.archive-detail {
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 6px 0 10px;
+}
 </style>

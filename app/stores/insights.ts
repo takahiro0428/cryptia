@@ -11,6 +11,15 @@ const CACHE_TTL_MS = 5 * 60 * 1000
  * AI インサイトストア（UC-3 / F-03）。
  * サーバー API（Vertex AI）を呼び、失敗時はクライアント内フォールバックで生成する。
  */
+/**
+ * キャッシュキーには適用中戦略（insights コンテキスト）の ID を含める。
+ * 画面別戦略ピッカーで切り替えた瞬間に表示が追随し、戦略とインサイトの
+ * サイレント不一致（最大 5 分）を防ぐ（ISSUE-P9-M3）。
+ */
+function insightKey(assetId: string, horizon: Horizon): string {
+  return `${assetId}:${horizon}:${useStrategyStore().docFor('insights').id}`
+}
+
 export const useInsightsStore = defineStore('insights', {
   state: () => ({
     cache: {} as Record<string, Insight>,
@@ -20,20 +29,20 @@ export const useInsightsStore = defineStore('insights', {
   }),
   getters: {
     insightFor: (state) => (assetId: string, horizon: Horizon) =>
-      state.cache[`${assetId}:${horizon}`],
+      state.cache[insightKey(assetId, horizon)],
     isLoading: (state) => (assetId: string, horizon: Horizon) =>
-      state.loadingKeys.includes(`${assetId}:${horizon}`),
+      state.loadingKeys.includes(insightKey(assetId, horizon)),
   },
   actions: {
     async fetchInsight(ticker: Ticker, horizon: Horizon, force = false): Promise<Insight> {
-      const key = `${ticker.assetId}:${horizon}`
+      const key = insightKey(ticker.assetId, horizon)
       const cached = this.cache[key]
       if (!force && cached && Date.now() - cached.generatedAt < CACHE_TTL_MS) return cached
       if (this.loadingKeys.includes(key)) return cached ?? fallbackInsight(ticker, horizon)
 
       this.loadingKeys.push(key)
       const strategyStore = useStrategyStore()
-      const strategy = strategyStore.activeDoc
+      const strategy = strategyStore.docFor('insights')
       try {
         const insight = await $fetch<Insight>('/api/ai/insight', {
           method: 'POST',

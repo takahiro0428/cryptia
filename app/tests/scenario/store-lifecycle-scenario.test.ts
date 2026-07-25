@@ -24,20 +24,22 @@ describe('シナリオ: 戦略設定 → デモトレード → アーカイブ'
     await market.fetchTickers()
     expect(market.usingMockData).toBe(true)
 
-    // UC-7: 戦略を切り替える
+    // UC-7: 戦略を画面別に切り替える（デモ画面のみ変更 → 他画面は既定のまま）
     const strategy = useStrategyStore()
     await strategy.restoreState()
-    strategy.setActive('preset-breakout')
-    expect(strategy.activeDoc.name).toBe('ブレイクアウト追撃')
+    strategy.setActiveFor('demo', 'preset-breakout')
+    expect(strategy.docFor('demo').name).toBe('ブレイクアウト追撃')
+    expect(strategy.docFor('solana').id).toBe('preset-degen-ladder')
 
-    // カスタム戦略の追加 → 有効化
+    // カスタム戦略の追加 → 全画面へ一括適用
     const custom = strategy.addCustom({
       name: 'テスト戦略',
       content: '- テスト用のルール',
       riskLevel: 2,
     })
-    strategy.setActive(custom.id)
-    expect(strategy.activeDoc.builtin).toBe(false)
+    strategy.setActiveAll(custom.id)
+    expect(strategy.docFor('demo').builtin).toBe(false)
+    expect(strategy.docFor('insights').id).toBe(custom.id)
 
     // UC-4: デモトレード開始（ロジックエンジン）
     const demo = useDemoTradeStore()
@@ -58,6 +60,10 @@ describe('シナリオ: 戦略設定 → デモトレード → アーカイブ'
     if (ordersAfterTicks > 0) {
       expect(demo.archives).toHaveLength(1)
       expect(demo.archives[0].summary.tradeCount).toBe(ordersAfterTicks)
+      // 約定履歴が閲覧用に保存される（F-04）
+      expect(demo.archives[0].orders).toBeDefined()
+      expect(demo.archives[0].orders!.length).toBe(Math.min(ordersAfterTicks, 100))
+      expect(demo.archives[0].orders![0].reason.length).toBeGreaterThan(0)
     }
 
     // 再開始してもアーカイブは残る（冪等性と状態保護: 原則2）
@@ -96,15 +102,30 @@ describe('シナリオ: 戦略設定 → デモトレード → アーカイブ'
     vi.unstubAllGlobals()
   })
 
-  it('戦略の削除でプリセットは保護され、有効戦略はデフォルトへ戻る', async () => {
+  it('戦略の削除でプリセットは保護され、適用中の画面は各画面の既定へ戻る', async () => {
     const strategy = useStrategyStore()
     await strategy.restoreState()
     const custom = strategy.addCustom({ name: '削除対象', content: 'x', riskLevel: 3 })
-    strategy.setActive(custom.id)
+    strategy.setActiveAll(custom.id)
     strategy.removeCustom(custom.id)
-    expect(strategy.activeId).toBe(STRATEGY_PRESETS[0].id)
+    // 画面ごとの既定戦略へ戻る（全画面共通の先頭プリセットではない）
+    expect(strategy.docFor('demo').id).toBe('preset-momentum')
+    expect(strategy.docFor('solana').id).toBe('preset-degen-ladder')
+    expect(strategy.docFor('live').id).toBe('preset-dca')
     // プリセットは削除できない
     strategy.removeCustom(STRATEGY_PRESETS[0].id)
     expect(strategy.allDocs.some((d) => d.id === STRATEGY_PRESETS[0].id)).toBe(true)
+  })
+
+  it('旧形式（全画面共通 activeId）の保存データは全画面へ移行される（原則7）', async () => {
+    localStorage.setItem(
+      'cryptia:strategies',
+      JSON.stringify({ savedAt: 1, data: { customDocs: [], activeId: 'preset-breakout' } }),
+    )
+    const strategy = useStrategyStore()
+    await strategy.restoreState()
+    expect(strategy.docFor('demo').id).toBe('preset-breakout')
+    expect(strategy.docFor('insights').id).toBe('preset-breakout')
+    expect(strategy.docFor('live').id).toBe('preset-breakout')
   })
 })

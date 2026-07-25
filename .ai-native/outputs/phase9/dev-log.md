@@ -1,0 +1,52 @@
+# Phase 9: 運用フィードバック対応 開発ログ
+
+## 実施日
+2026-07-25（オペレーターの本番利用フィードバック 5 件への対応）
+
+## オペレーター報告と対応
+
+| # | 報告 | 根本原因 | 対応 | 主なファイル |
+|---|------|---------|------|-------------|
+| 1 | 「dexscreener に接続できないと表示されている」 | ブラウザから `api.dexscreener.com` へ直接到達できない環境（企業 NW・広告ブロッカー等）ではフォールバックがモック表示しかなかった | **サーバープロキシ経路を新設**（`/api/solana/screen`・`pairs`・`fresh`）。クライアントは直接取得 → 失敗時プロキシへ自動切替（sticky・自己回復つき）。警告バナーに**再試行ボタン**とエラーコードを追加 | `server/api/solana/*`, `server/utils/dexProxy.ts`, `stores/solana.ts` |
+| 2 | 「損益情報が初期のまま表示される」（Solana魔界・デモ共通） | (a) #1 のモック表示時は価格が静的で損益が動かない (b) Solana魔界は一時停止中・復元直後に価格更新経路がなかった | (a) #1 のプロキシで実データ復旧 (b) **`refreshDisplayPrices()` を新設**し、画面から 10 秒間隔 + visibilitychange で実行中/停止中を問わず保有ペアの価格を更新。ダッシュボードに「価格更新: n 秒前」の鮮度表示を追加。CoinGecko にも同様のプロキシ（`/api/market/tickers`）を追加しデモ側の凍結も防止 | `stores/solana.ts`, `pages/trade/solana.vue`, `server/api/market/tickers.get.ts`, `stores/market.ts`, `pages/trade/demo.vue` |
+| 3 | 「取引戦略を画面ごとに設定したい」 | 戦略は全画面共通の `activeId` 1 本だった | **画面別戦略（`activeByContext`）へ再設計**。AI分析 / AIデモトレード / Solana魔界 / 実トレードの 4 コンテキストごとに選択・保存。各画面に `StrategyPicker` を配置し、戦略画面に「画面別の適用戦略」セクション + 「すべての画面に適用」を追加。旧形式は復元時に全画面へ移行（原則7） | `stores/strategy.ts`, `components/StrategyPicker.vue`, `pages/strategy.vue`, 各画面 |
+| 4 | 「新規発行トークンのスナイプモードが欲しい（dev 情報・SNS・初期流動性・再発行チェックで選定）」 | 未実装 | **新規上場ハンター（スナイプ）を追加**。発見: DexScreener token-profiles → 代表ペア解決 → 48h 以内に限定。シグナル: SNS（サイト/X/TG）・mint/freeze 権限（Solana RPC `getMultipleAccounts`）・初期流動性スイートスポット（$5k-150k）・同名/同シンボル再発行照合・初動需給 → **候補/要注意/回避** の 3 段階判定。出口は利益確保型ラダー（+50%で30%利確 → +100%で30% → +300%で20% → 残20%は伸ばす / -40%で全損切り） | `shared/snipeScoring.ts`, `shared/dexscreener.ts`, `server/api/solana/fresh.get.ts`, `components/SnipeTokenCard.vue`, `stores/solana.ts`, `pages/trade/solana.vue` |
+| 5 | 「過去の取引履歴を見る場所がない。記録したと表示されるが閲覧したい」 | アーカイブはサマリーのみ保存し、約定明細は破棄していた | **アーカイブへ約定履歴（orders）+ シンボル対応表を保存**し、過去セッション行のタップで OrderList を展開表示。容量保護のため直近 10 セッション・各 100 件のみ明細保持（超過はサマリーのみ）。旧アーカイブは注記つきでサマリー閲覧可（原則7） | `stores/demoTrade.ts`, `stores/solana.ts`, `pages/trade/demo.vue`, `pages/trade/solana.vue` |
+| 6 | 「ウォレット接続すると残高取得中と表示され続ける」（スクリーンショット添付） | 公開 Solana RPC（mainnet-beta）がブラウザ発のリクエストを遮断/レートリミットし、取得失敗時のエラー状態が UI になく `solBalance: null` = 「取得中…」表示が永続していた | (a) **読み取り専用 RPC プロキシ**（`/api/solana/rpc`・許可メソッド `getBalance`/`getTokenAccountsByOwner` のみ・アドレス検証）を新設し、直接 → 失敗時プロキシの sticky フォールバック (b) `balanceLoading` / `balanceError` を導入し、失敗時は**明示的なエラー表示（CRYPTIA-E505 新設）+ 再試行導線**に変更。「取引時に残高は再検証されるため資産は安全」の注記を追加 | `server/api/solana/rpc.post.ts`, `stores/wallet.ts`, `pages/trade/live.vue`, `shared/errors.ts` |
+| 7 | 「Phantom 以外も使いたい。メインは Bitget Wallet」 | 接続処理が `window.solana.isPhantom` 固定だった | **マルチウォレット対応**。Phantom（`window.phantom.solana`）/ Bitget Wallet（`window.bitkeep.solana`）/ Solflare（`window.solflare`）/ 汎用 Phantom 互換（`window.solana`）を検出し、検出されたウォレットを選択ボタンで表示（provider 注入の遅延に備え未接続中は 2 秒ごと再検出）。接続中プロバイダはモジュール変数で保持（reactive state に外部オブジェクトを入れない Vue 指針に準拠）。署名確認ダイアログ・ガイド文言もウォレット名で表示 | `stores/wallet.ts`, `pages/trade/live.vue`, `pages/trade/index.vue` |
+
+## 設計判断
+
+- **プロキシの安全設計:** 任意 URL の中継はしない（エンドポイント固定・addrs は base58 検証・1〜30 件制限）。
+  IP 単位 30/分のレートリミット + 短期インメモリキャッシュ（8〜90s）+ 同一キーの inflight 合流で
+  上流レートリミット（DexScreener 約 300/分）を保護。上流失敗は 502 `CRYPTIA-E102` に正規化
+- **直接取得優先:** プロキシ常用は Cloud Functions の呼び出しコストとレイテンシを増やすため、
+  直接取得 → 失敗時のみプロキシの sticky 切替とした。プロキシも失敗したら次回は直接から再試行（自己回復）
+- **発見パイプラインの共通化（原則3):** `discoverFreshPairs()` は fetchJson 注入型として shared に置き、
+  サーバールートとクライアント直接フォールバックの双方で同一ロジックを使用。スコアリングも shared で共通
+- **未取得シグナルの扱い:** RPC・再発行照合の失敗は `null`（不明）とし、加点も減点もしない。
+  null による「回避」誤判定はしない（クライアント直接フォールバック時は SNS・流動性のみで評価）
+- **スナイプの既定ラダー:** メミコインの現実（急騰後の全戻しが多い）に合わせ、+50% で元本の一部を
+  早期回収する利益確保型。ムーンバッグ 20% を残して大きな伸びも取れる設計
+
+## 監査指摘の反映（プロキシの多層防御）
+
+システム監査官のイテレーション 1 指摘（Medium 3 / Low 2、詳細: review-results.md）を受けて強化:
+
+- **クォータはキャッシュミス時のみ消費**（企業 NAT の複数ユーザーがヒットを無償で共有）
+- **上流ホスト単位の総量バジェット**（dexscreener 60/分・coingecko 4/分・rpc 30/分/インスタンス）+
+  超過・上流障害時は期限切れキャッシュを **stale-while-error** で返して劣化継続
+- **保存容量の実測保証**（`shared/persistBudget.ts`: シリアライズ後バイト数で 200KB 予算に切り詰め）+
+  同期失敗のセッション初回通知（CRYPTIA-E601）
+- 信頼 IP 抽出の一本化（`clientIpFromForwarded`）・fresh パイプラインの全体デッドライン 20s
+
+## テスト
+
+- 追加: `snipeScoring.test.ts`（判定・再発行検出・スナイプラダー 11 件）、
+  `dexscreener.test.ts`（変換・検証・SNS 抽出・発見パイプライン 6 件）、
+  `persistBudget.test.ts`（容量保証 5 件）
+- 更新: `store-lifecycle-scenario.test.ts`（画面別戦略 API へ移行 + 旧形式移行テスト + アーカイブ約定保存の検証）
+- 結果: **124 件全パス**（単体 81 / 結合 33 / シナリオ 10）+ ビルド成功
+- 実機検証（Playwright・モバイル 390x844）: 26 項目 PASS
+  （モック警告 + 再試行 / スナイプタブ / セッション終了→過去セッション展開 / リロード後の履歴閲覧 /
+  画面別ピッカー 4 つ / Bitget Wallet モック接続 / 残高エラーの明示表示 / プロキシ 400・502 正規化）

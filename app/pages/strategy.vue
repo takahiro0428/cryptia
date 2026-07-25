@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Check, Plus } from '@lucide/vue'
 import type { StrategyDoc } from '~/shared/types'
-import { useStrategyStore } from '~/stores/strategy'
+import { STRATEGY_CONTEXTS, useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
 
 // RAG 戦略設定（UC-7 / F-09）
@@ -58,8 +58,7 @@ function save() {
     ui.notify('戦略を更新しました')
   } else {
     const doc = strategy.addCustom({ ...form })
-    strategy.setActive(doc.id)
-    ui.notify(`戦略「${doc.name}」を追加し、有効化しました`)
+    ui.notify(`戦略「${doc.name}」を追加しました。各画面のピッカーまたは下のボタンで適用できます`)
   }
   showForm.value = false
 }
@@ -75,6 +74,11 @@ onMounted(() => void strategy.restoreState())
 useHead({ title: '戦略設定 | Cryptia' })
 
 const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '超積極的']
+
+/** このドキュメントを適用中の画面ラベル一覧 */
+function contextsUsing(docId: string): string[] {
+  return STRATEGY_CONTEXTS.filter((c) => strategy.activeByContext[c.key] === docId).map((c) => c.label)
+}
 </script>
 
 <template>
@@ -86,9 +90,15 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
       </button>
     </div>
     <p class="small dim">
-      選択した戦略ドキュメントが AI のプロンプトに注入され、インサイト・デモトレード・実トレードの判断が変わります。
-      プリセットは複製してカスタマイズできます。
+      戦略ドキュメントが AI のプロンプトに注入され、各画面の判断が変わります。
+      戦略は<b>画面ごとに個別設定</b>できます（プリセットは複製してカスタマイズ可能）。
     </p>
+
+    <!-- 画面別の適用戦略 -->
+    <section class="card">
+      <h2>画面別の適用戦略</h2>
+      <StrategyPicker v-for="c in STRATEGY_CONTEXTS" :key="c.key" :context="c.key" />
+    </section>
 
     <!-- 戦略編集フォーム -->
     <section v-if="showForm" ref="formRef" class="card" style="border-color: var(--accent)">
@@ -126,7 +136,7 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
         v-for="doc in strategy.allDocs"
         :key="doc.id"
         class="card strategy-card"
-        :class="{ active: doc.id === strategy.activeId }"
+        :class="{ active: contextsUsing(doc.id).length > 0 }"
       >
         <div class="card-title">
           <h2>
@@ -139,16 +149,13 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
           </span>
         </div>
         <pre class="content small dim">{{ doc.content }}</pre>
+        <div v-if="contextsUsing(doc.id).length > 0" class="using-row">
+          <Check :size="13" class="up" aria-hidden="true" />
+          <span class="xs up">適用中: {{ contextsUsing(doc.id).join(' / ') }}</span>
+        </div>
         <div class="actions">
-          <button
-            class="btn btn-sm"
-            :class="doc.id === strategy.activeId ? 'btn-success' : 'btn-primary'"
-            type="button"
-            :disabled="doc.id === strategy.activeId"
-            @click="strategy.setActive(doc.id)"
-          >
-            <Check v-if="doc.id === strategy.activeId" :size="14" aria-hidden="true" />
-            {{ doc.id === strategy.activeId ? '適用中' : 'この戦略を使う' }}
+          <button class="btn btn-sm btn-primary" type="button" @click="strategy.setActiveAll(doc.id)">
+            すべての画面に適用
           </button>
           <button class="btn btn-sm btn-ghost" type="button" @click="startEdit(doc)">
             {{ doc.builtin ? '複製して編集' : '編集' }}
@@ -164,6 +171,7 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
 
 <style scoped>
 .strategy-card.active { border-color: var(--up); }
+.using-row { display: flex; align-items: center; gap: 5px; margin-bottom: 8px; }
 .content {
   white-space: pre-wrap;
   font-family: inherit;
