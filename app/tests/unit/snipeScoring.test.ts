@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   countDuplicates,
+  passesMinimalAudit,
   scoreFreshToken,
   SNIPE_LADDER_RULES,
   type FreshTokenSignals,
@@ -135,6 +136,62 @@ describe('snipeScoring: 再発行検出', () => {
       { baseSymbol: 'ZZZ', baseName: 'ab', baseAddress: 'MINTshortxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', ageHours: 100 },
     ]
     expect(countDuplicates(candidates, short)).toBe(0)
+  })
+})
+
+describe('snipeScoring: 自動スナイプの最低限監査', () => {
+  it('候補判定 + 全シグナル良好は通過する', () => {
+    expect(passesMinimalAudit(scoreFreshToken(token(), signals()))).toBe(true)
+  })
+
+  it('要注意判定は既定で不通過、allowCaution で通過する', () => {
+    // サイトのみ・権限未取得 → スコア 40 台の「要注意」帯
+    const caution = scoreFreshToken(
+      token(),
+      signals({
+        hasTwitter: false,
+        hasTelegram: false,
+        mintAuthorityRenounced: null,
+        freezeAuthorityAbsent: null,
+        duplicateCount: 0,
+        buys24h: 10,
+        sells24h: 10,
+      }),
+    )
+    expect(caution.verdict).toBe('caution')
+    expect(passesMinimalAudit(caution)).toBe(false)
+    expect(passesMinimalAudit(caution, { allowCaution: true })).toBe(true)
+  })
+
+  it('mint 権限の残存が判明している場合は候補判定でも不通過', () => {
+    const score = scoreFreshToken(token(), signals({ mintAuthorityRenounced: false }))
+    expect(score.verdict).toBe('candidate') // 総合点では候補に届く
+    expect(passesMinimalAudit(score)).toBe(false)
+  })
+
+  it('freeze 権限の残存が判明している場合は不通過', () => {
+    const score = scoreFreshToken(token(), signals({ freezeAuthorityAbsent: false }))
+    expect(passesMinimalAudit(score)).toBe(false)
+  })
+
+  it('流動性 $5k 未満は不通過', () => {
+    const score = scoreFreshToken(token({ liquidityUsd: 4_000 }), signals())
+    expect(passesMinimalAudit(score, { allowCaution: true })).toBe(false)
+  })
+
+  it('回避判定は allowCaution でも不通過', () => {
+    const score = scoreFreshToken(token(), signals({ duplicateCount: 3 }))
+    expect(score.verdict).toBe('avoid')
+    expect(passesMinimalAudit(score, { allowCaution: true })).toBe(false)
+  })
+
+  it('未取得（null）シグナルは拒否理由にしない', () => {
+    const score = scoreFreshToken(
+      token(),
+      signals({ mintAuthorityRenounced: null, freezeAuthorityAbsent: null, duplicateCount: null }),
+    )
+    expect(score.verdict).toBe('candidate')
+    expect(passesMinimalAudit(score)).toBe(true)
   })
 })
 

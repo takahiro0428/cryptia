@@ -58,6 +58,34 @@ export const SNIPE_LADDER_RULES: LadderRule[] = [
   { triggerPct: -40, sellRatio: 1 },
 ]
 
+/** 自動スナイプ監査: エントリーを許可する最低流動性 */
+export const AUTO_SNIPE_MIN_LIQUIDITY_USD = 5_000
+
+/**
+ * 自動スナイプ（常時監視）の最低限監査 = エントリーゲート。
+ * スコアリングの総合判定に加え、「危険と判明している」シグナルを個別に拒否する。
+ * null（未取得）は拒否しない — 取得できないことと危険であることは区別する
+ * （厳格にしすぎると照合系 API の一時障害で全エントリーが止まるため）。
+ */
+export function passesMinimalAudit(
+  score: SnipeScore,
+  opts: { allowCaution?: boolean } = {},
+): boolean {
+  const verdictOk = opts.allowCaution
+    ? score.verdict !== 'avoid'
+    : score.verdict === 'candidate'
+  return (
+    verdictOk &&
+    score.token.liquidityUsd >= AUTO_SNIPE_MIN_LIQUIDITY_USD &&
+    // mint 権限の残存が判明 = dev が無限増発可能 → 拒否
+    score.signals.mintAuthorityRenounced !== false &&
+    // freeze 権限の残存が判明 = 売却を凍結され得る → 拒否
+    score.signals.freezeAuthorityAbsent !== false &&
+    // 同名再発行 2 件以上 = ラグ後の再発行パターン → 拒否
+    (score.signals.duplicateCount ?? 0) < 2
+  )
+}
+
 /**
  * 同一シンボル・同名の再発行検出。
  * 検索結果のペア群から「別のミントアドレスで、対象より古い、同一シンボル or 同名」を数える。

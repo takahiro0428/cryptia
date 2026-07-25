@@ -5,6 +5,7 @@ import {
   ChevronUp,
   Pause,
   Play,
+  Radar,
   RefreshCw,
   Rocket,
   Square,
@@ -15,6 +16,7 @@ import { fmtAgo, fmtPct, fmtUsd } from '~/shared/format'
 import {
   DEGEN_METHOD_LABELS,
   DISPLAY_REFRESH_MS,
+  normalizeAutoSnipe,
   useSolanaStore,
   type DegenMethod,
 } from '~/stores/solana'
@@ -27,8 +29,14 @@ const strategy = useStrategyStore()
 const allocatedUsd = ref(1_000)
 const method = ref<DegenMethod>('ladder')
 const selectedPairs = ref<string[]>([])
+/** 自動スナイプ設定（最大同時ポジション数・監査基準） */
+const autoMaxPositions = ref(5)
+const autoAllowCaution = ref(false)
 /** 展開中の過去セッション（約定履歴の閲覧: F-05） */
 const expandedArchive = ref<number | null>(null)
+
+/** 新規上場リストを使う手法か（スナイプ / 自動スナイプ） */
+const usesFresh = (m: DegenMethod) => m === 'snipe' || m === 'auto-snipe'
 
 function togglePair(addr: string) {
   selectedPairs.value = selectedPairs.value.includes(addr)
@@ -43,15 +51,29 @@ function applyRecommendation() {
       : solana.recommended.slice(0, 3).map((s) => s.token.pairAddress)
 }
 
-// スナイプは新規上場リスト・他手法はスクリーニングリストから選ぶため、切替時に選択をリセット
+// スナイプ系は新規上場リスト・他手法はスクリーニングリストから選ぶため、切替時に選択をリセット
 watch(method, (m, prev) => {
-  if ((m === 'snipe') !== (prev === 'snipe')) selectedPairs.value = []
-  if (m === 'snipe') void solana.fetchFreshTokens()
+  if (usesFresh(m) !== usesFresh(prev)) selectedPairs.value = []
+  if (usesFresh(m)) void solana.fetchFreshTokens()
 })
 
 /** 開始後はダッシュボード（ページ上部に描画）へ視点を移動する */
 async function startSession() {
-  await solana.start(allocatedUsd.value, selectedPairs.value, method.value)
+  let autoConfig
+  if (method.value === 'auto-snipe') {
+    // 実効値をフォームへ書き戻し、表示と実行のサイレント乖離を防ぐ
+    autoConfig = normalizeAutoSnipe({
+      maxPositions: autoMaxPositions.value,
+      allowCaution: autoAllowCaution.value,
+    })
+    autoMaxPositions.value = autoConfig.maxPositions
+  }
+  await solana.start(
+    allocatedUsd.value,
+    method.value === 'auto-snipe' ? [] : selectedPairs.value,
+    method.value,
+    autoConfig,
+  )
   if (solana.portfolio) window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
@@ -142,12 +164,15 @@ useHead({ title: 'Solana魔界 | Cryptia' })
       </label>
       <div class="field">
         <span class="small dim">取引手法</span>
-        <div class="tabs" style="max-width: 560px">
+        <div class="tabs" style="max-width: 680px">
           <button class="tab" :class="{ active: method === 'ladder' }" type="button" @click="method = 'ladder'">
             ラダーロジック
           </button>
           <button class="tab" :class="{ active: method === 'snipe' }" type="button" @click="method = 'snipe'">
             <Rocket :size="13" aria-hidden="true" /> 新規上場ハンター
+          </button>
+          <button class="tab" :class="{ active: method === 'auto-snipe' }" type="button" @click="method = 'auto-snipe'">
+            <Radar :size="13" aria-hidden="true" /> 自動スナイプ
           </button>
           <button class="tab" :class="{ active: method === 'ai' }" type="button" @click="method = 'ai'">
             AI 取引
@@ -161,16 +186,42 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             発行 48 時間以内の新規上場トークンを、dev 情報（mint/freeze 権限）・SNS の有無・初期流動性・同一 dev の再発行チェックで選定。
             +50% で 30% 利確（早期に元本回収）→ +100% で 30% → +300% で 20% と利益を確保しながら残り 20% で大きな伸びを狙い、-40% で全損切りします。
           </template>
+          <template v-else-if="method === 'auto-snipe'">
+            <b>トークンの選択は不要です。</b>新規上場トークン（発行 48 時間以内）を常時監視し、最低限の監査を通過したトークンへ
+            随時、等分予算で自動エントリーします。出口は新規上場ハンターと同じ利益確保型ラダー
+            （+50% で 30% 利確 → +100% で 30% → +300% で 20%、-40% で全損切り）。一度エントリーしたトークンには再エントリーしません。
+          </template>
           <template v-else>
             ティックごとに AI（Vertex AI、未接続時はロジック）がスコア・戦略「{{ strategy.docFor('solana').name }}」に基づいて売買を判断します。
           </template>
+        </p>
+      </div>
+
+      <!-- 自動スナイプ設定 -->
+      <div v-if="method === 'auto-snipe'" class="field">
+        <div class="grid grid-2">
+          <label class="field">
+            <span>最大同時ポジション数（1 枠の予算 = 割当資金 ÷ 本数）</span>
+            <input v-model.number="autoMaxPositions" type="number" class="input" min="1" max="10" step="1" inputmode="numeric" />
+          </label>
+          <label class="field">
+            <span>監査基準</span>
+            <select v-model="autoAllowCaution" class="input">
+              <option :value="false">「候補」判定のみ（推奨）</option>
+              <option :value="true">「要注意」判定まで許容（積極的）</option>
+            </select>
+          </label>
+        </div>
+        <p class="xs dim">
+          最低限の監査 = 総合判定 + 初期流動性 $5k 以上 + mint/freeze 権限の残存が判明していない + 同名再発行 2 件未満。
+          監査は取得できた公開情報に基づく選定支援であり、安全性・利益を保証しません。
         </p>
       </div>
       <div class="field">
         <StrategyPicker context="solana" />
       </div>
       <div class="field">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
+        <div v-if="method !== 'auto-snipe'" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
           <span class="small dim">対象トークン（{{ selectedPairs.length }} 選択中）</span>
           <button
             class="btn btn-sm"
@@ -181,9 +232,14 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             <Bot :size="14" aria-hidden="true" /> AI のおすすめを使う
           </button>
         </div>
+        <div v-else style="margin-bottom: 6px">
+          <span class="small dim">
+            現在の監視状況: 新規上場 {{ solana.freshTokens.length }} 件中、監査通過 {{ solana.freshAuditPassedCount }} 件
+          </span>
+        </div>
 
-        <!-- スナイプ: 新規上場（48h以内）トークンから選択 -->
-        <template v-if="method === 'snipe'">
+        <!-- スナイプ / 自動スナイプ: 新規上場（48h以内）トークンのリスト -->
+        <template v-if="usesFresh(method)">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
             <span class="xs faint">
               新規上場トークン {{ solana.freshTokens.length }} 件
@@ -208,12 +264,18 @@ useHead({ title: 'Solana魔界 | Cryptia' })
               v-for="s in solana.freshTokens"
               :key="s.token.pairAddress"
               :score="s"
-              :selected="selectedPairs.includes(s.token.pairAddress)"
-              @select="togglePair"
+              :selected="method === 'snipe' && selectedPairs.includes(s.token.pairAddress)"
+              @select="(addr) => method === 'snipe' && togglePair(addr)"
             />
           </div>
           <p class="xs faint" style="margin-top: 6px">
-            シグナル（mint 権限・再発行照合等）は取得できた公開情報に基づく選定支援であり、安全性や利益を保証しません。
+            <template v-if="method === 'auto-snipe'">
+              上のリストは監視のプレビューです（選択は不要）。実行中は約 30 秒ごとに監視し、監査通過トークンへ
+              執行直前の最新価格を再取得したうえで自動エントリーします。
+            </template>
+            <template v-else>
+              シグナル（mint 権限・再発行照合等）は取得できた公開情報に基づく選定支援であり、安全性や利益を保証しません。
+            </template>
           </p>
         </template>
         <p v-else class="xs faint">下部の「トークンスクリーニング」からカードをタップして選択します。</p>
@@ -222,7 +284,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         class="btn btn-primary"
         style="width: 100%"
         type="button"
-        :disabled="selectedPairs.length === 0 || allocatedUsd < 100"
+        :disabled="(method !== 'auto-snipe' && selectedPairs.length === 0) || allocatedUsd < 100"
         @click="startSession"
       >
         <Play :size="15" aria-hidden="true" /> 魔界トレードを開始
@@ -258,6 +320,13 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         <template v-else-if="solana.lastPricesAt">
           価格更新: {{ fmtAgo(solana.lastPricesAt) }}（{{ solana.running ? '自動売買 実行中' : '一時停止中も約10秒ごとに更新' }}）
         </template>
+      </p>
+      <p v-if="solana.method === 'auto-snipe'" class="xs dim" style="margin: 0 0 8px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap">
+        <Radar :size="13" aria-hidden="true" />
+        常時監視{{ solana.running ? '中' : '（一時停止）' }}:
+        新規上場 {{ solana.freshTokens.length }} 件 / 監査通過 {{ solana.freshAuditPassedCount }} 件 /
+        累計エントリー {{ solana.enteredPairs.length }} 件（最大同時 {{ solana.autoSnipe.maxPositions }}・{{ solana.autoSnipe.allowCaution ? '要注意まで許容' : '候補のみ' }}）
+        <template v-if="solana.freshFetchedAt">・監視更新 {{ fmtAgo(solana.freshFetchedAt) }}</template>
       </p>
       <PriceChart v-if="equityValues.length >= 2" :values="equityValues" color="#14f195" />
 
