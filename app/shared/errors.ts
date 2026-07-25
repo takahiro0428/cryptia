@@ -34,6 +34,8 @@ export const ERROR_CODES = {
   WALLET_NOT_CONNECTED: 'CRYPTIA-E503',
   /** スワップ見積り（Jupiter）取得に失敗 */
   SWAP_QUOTE_FAILED: 'CRYPTIA-E504',
+  /** ウォレット残高の取得に失敗（RPC 遮断・混雑） */
+  BALANCE_FETCH_FAILED: 'CRYPTIA-E505',
   /** Firestore 同期に失敗（ローカル保存で継続） */
   SYNC_FAILED: 'CRYPTIA-E601',
 } as const

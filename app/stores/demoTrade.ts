@@ -9,7 +9,8 @@ import {
   recordEquity,
   summarize,
 } from '~/shared/tradeEngine'
-import type { Portfolio, PortfolioSummary, TradeDecision } from '~/shared/types'
+import { fitArchivesToBudget, utf8Bytes } from '~/shared/persistBudget'
+import type { Order, Portfolio, PortfolioSummary, TradeDecision } from '~/shared/types'
 import { aiAuthHeaders } from '~/composables/useFirebase'
 import { persist, restore } from '~/composables/usePersistence'
 import { useMarketStore } from '~/stores/market'
@@ -19,6 +20,10 @@ import { useUiStore } from '~/stores/ui'
 const STORE_KEY = 'demo-trade'
 /** 判断ティック間隔（価格ポーリング 15s に対し 20s で1テンポ遅らせる） */
 export const TICK_INTERVAL_MS = 20_000
+/** アーカイブ1件に保存する約定履歴の上限（Firestore ドキュメント容量保護） */
+const ARCHIVE_ORDERS_MAX = 100
+/** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
+const ARCHIVE_ORDERS_KEEP = 10
 
 export type EngineMode = 'ai' | 'logic'
 
@@ -27,6 +32,8 @@ interface ArchivedSession {
   summary: PortfolioSummary
   strategyName: string
   assetIds: string[]
+  /** 約定履歴（閲覧用: F-04）。容量保護のため直近セッション分のみ保持 */
+  orders?: Order[]
 }
 
 interface PersistedDemo {
@@ -80,13 +87,18 @@ export const useDemoTradeStore = defineStore('demoTrade', {
       this.restored = true
     },
     _persist() {
-      persist<PersistedDemo>(STORE_KEY, {
+      const payload: PersistedDemo = {
         portfolio: this.portfolio ? JSON.parse(JSON.stringify(this.portfolio)) : null,
         running: this.running,
         assetIds: [...this.assetIds],
         engineMode: this.engineMode,
         archives: JSON.parse(JSON.stringify(this.archives)),
-      })
+      }
+      // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）
+      payload.archives = fitArchivesToBudget(payload.archives, (a) =>
+        utf8Bytes(JSON.stringify({ ...payload, archives: a })),
+      )
+      persist<PersistedDemo>(STORE_KEY, payload)
     },
     /** AI おすすめ銘柄（短期スタンスのスコア上位。UC-4: 銘柄は AI おすすめから選べる） */
     recommendedAssets(limit = 4): { assetId: string; confidence: number; summary: string }[] {
@@ -149,14 +161,18 @@ export const useDemoTradeStore = defineStore('demoTrade', {
         this.portfolio = null
         return
       }
-      const strategyName = useStrategyStore().activeDoc.name
+      const strategyName = useStrategyStore().docFor('demo').name
       this.archives.unshift({
         endedAt: Date.now(),
         summary: summarize(this.portfolio, useMarketStore().priceMap),
         strategyName,
         assetIds: [...this.assetIds],
+        orders: this.portfolio.orders.slice(-ARCHIVE_ORDERS_MAX),
       })
-      this.archives = this.archives.slice(0, 20)
+      // 容量保護: 古いアーカイブは約定明細を落としてサマリーのみ残す（原則2: 記録は保護）
+      this.archives = this.archives
+        .slice(0, 20)
+        .map((a, i) => (i < ARCHIVE_ORDERS_KEEP ? a : { ...a, orders: undefined }))
       this._session++
       this.portfolio = null
     },
@@ -165,7 +181,7 @@ export const useDemoTradeStore = defineStore('demoTrade', {
       this.stop()
       this.archiveCurrent()
       this._persist()
-      useUiStore().notify('セッションを終了し、結果をアーカイブに保存しました')
+      useUiStore().notify('セッションを終了し、結果を過去セッション（約定履歴つき）に保存しました')
     },
     /** 1ティック分の自動売買。銘柄ごとに判断 → 執行 → 資産推移記録 */
     async tick() {
@@ -175,7 +191,7 @@ export const useDemoTradeStore = defineStore('demoTrade', {
       try {
         const market = useMarketStore()
         const strategyStore = useStrategyStore()
-        const strategy = strategyStore.activeDoc
+        const strategy = strategyStore.docFor('demo')
         const prices = market.priceMap
 
         for (const assetId of [...this.assetIds]) {

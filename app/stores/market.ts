@@ -43,6 +43,10 @@ export const useMarketStore = defineStore('market', {
     _pollTimer: null as ReturnType<typeof setInterval> | null,
     _ws: null as WebSocket | null,
     _wsRetryTimer: null as ReturnType<typeof setTimeout> | null,
+    /** 価格の取得経路。直接取得に失敗したらプロキシへ sticky 切替（自己回復つき） */
+    _via: 'direct' as 'direct' | 'proxy',
+    /** 多重フェッチ防止（最悪ケースで応答がポーリング間隔を超えるため: ISSUE-P9-M2） */
+    _fetching: false,
   }),
   getters: {
     tickerOf: (state) => (assetId: string) => state.tickers.find((t) => t.assetId === assetId),
@@ -68,19 +72,44 @@ export const useMarketStore = defineStore('market', {
         state.netFlows[period]?.entries.some((e) => e.measured) ? 'measured-hybrid' : 'estimated',
   },
   actions: {
+    /**
+     * CoinGecko 取得（直接 → 失敗時は自アプリのプロキシへ sticky 切替）。
+     * ブラウザから到達できない環境（ネットワーク遮断・広告ブロッカー等）で
+     * 毎ポーリングの直接タイムアウト待ちを繰り返さない。プロキシも失敗したら
+     * 次回は直接から再試行する（自己回復）。
+     */
+    async _fetchMarkets(url: string): Promise<CoinGeckoMarket[]> {
+      if (this._via === 'direct') {
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(8_000) })
+          if (!res.ok) {
+            throw new CryptiaError(
+              ERROR_CODES.MARKET_FETCH_FAILED,
+              `価格 API がエラーを返しました（HTTP ${res.status}）`,
+            )
+          }
+          return (await res.json()) as CoinGeckoMarket[]
+        } catch {
+          const data = await $fetch<CoinGeckoMarket[]>('/api/market/tickers', { timeout: 12_000 })
+          this._via = 'proxy'
+          return data
+        }
+      }
+      try {
+        return await $fetch<CoinGeckoMarket[]>('/api/market/tickers', { timeout: 12_000 })
+      } catch (err) {
+        this._via = 'direct'
+        throw err
+      }
+    },
     async fetchTickers() {
+      if (this._fetching) return
+      this._fetching = true
       this.loading = this.tickers.length === 0
       try {
         const ids = ASSETS.map((a) => a.id).join(',')
         const url = `${COINGECKO_URL}?vs_currency=usd&ids=${ids}&sparkline=true&price_change_percentage=1h,24h,7d&per_page=${ASSETS.length}`
-        const res = await fetch(url)
-        if (!res.ok) {
-          throw new CryptiaError(
-            ERROR_CODES.MARKET_FETCH_FAILED,
-            `価格 API がエラーを返しました（HTTP ${res.status}）`,
-          )
-        }
-        const data = (await res.json()) as CoinGeckoMarket[]
+        const data = await this._fetchMarkets(url)
         if (!Array.isArray(data) || data.length === 0) {
           throw new CryptiaError(ERROR_CODES.MARKET_FETCH_FAILED, '価格 API の応答が空でした')
         }
@@ -110,6 +139,7 @@ export const useMarketStore = defineStore('market', {
         }
       } finally {
         this.loading = false
+        this._fetching = false
       }
     },
     /** ポーリング開始（多重起動しない: 冪等）。同時に価格ストリーミングも開始する */

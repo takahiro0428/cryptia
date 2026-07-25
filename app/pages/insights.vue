@@ -35,8 +35,13 @@ async function load(force = false) {
   await insights.fetchInsight(ticker.value, horizon.value, force)
 }
 
-// 銘柄・時間軸の変更、および初回ティッカー到着で自動生成
-watch([assetId, horizon, () => ticker.value?.assetId], () => void load(), { immediate: true })
+// 銘柄・時間軸・適用戦略の変更、および初回ティッカー到着で自動生成
+// （戦略はキャッシュキーに含まれるため、切替時は該当キーの生成/取得が走る）
+watch(
+  [assetId, horizon, () => ticker.value?.assetId, () => strategy.activeByContext.insights],
+  () => void load(),
+  { immediate: true },
+)
 onMounted(() => {
   void strategy.restoreState()
   void insights.fetchNews()
@@ -76,10 +81,7 @@ useHead({ title: 'AI分析 | Cryptia' })
       </button>
     </div>
 
-    <div class="small dim" style="margin-bottom: 10px">
-      適用中の戦略: <span class="badge badge-accent">{{ strategy.activeDoc.name }}</span>
-      <NuxtLink to="/strategy" class="small">変更 →</NuxtLink>
-    </div>
+    <StrategyPicker context="insights" />
 
     <div v-if="loading && !currentInsight" class="skeleton" style="height: 260px" />
     <template v-else-if="currentInsight">

@@ -15,7 +15,7 @@ const scoreColor = computed(() =>
 </script>
 
 <template>
-  <button class="token-card" :class="{ selected }" type="button" @click="$emit('select', t.pairAddress)">
+  <button class="token-card" :class="{ selected }" type="button" :aria-pressed="!!selected" @click="$emit('select', t.pairAddress)">
     <div class="head">
       <span class="bold">{{ t.baseSymbol }}</span>
       <span class="xs dim name">{{ t.baseName }}</span>

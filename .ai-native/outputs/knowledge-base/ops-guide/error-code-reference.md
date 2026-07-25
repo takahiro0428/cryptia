@@ -5,8 +5,8 @@
 
 | コード | 意味 | 主な原因 | ユーザー影響 | 対処 |
 |--------|------|---------|-------------|------|
-| CRYPTIA-E101 | 価格 API 取得失敗 | CoinGecko 障害・レートリミット・オフライン | 最終キャッシュ or モック表示（警告バナー） | 自動リトライ（15s 間隔）。頻発時は CoinGecko ステータス確認 |
-| CRYPTIA-E102 | DEX API 取得失敗 | DexScreener 障害 | Solana リストがモック表示 | 自動リトライ（30s 間隔） |
+| CRYPTIA-E101 | 価格 API 取得失敗 | CoinGecko 障害・レートリミット・オフライン | 最終キャッシュ or モック表示（警告バナー） | 直接取得失敗時はサーバープロキシ（`/api/market/tickers`）へ自動フォールバック。その上で失敗時は自動リトライ（15s 間隔）。頻発時は CoinGecko ステータス確認 |
+| CRYPTIA-E102 | DEX API 取得失敗 | DexScreener 障害・クライアント側ネットワーク遮断（企業 NW・広告ブロッカー） | Solana リストがモック表示（価格・損益は更新停止） | 直接取得失敗時はサーバープロキシ（`/api/solana/screen` / `pairs` / `fresh`）へ自動フォールバック。バナーの「再試行」で手動再接続も可能。プロキシ側でも失敗する場合は DexScreener ステータス確認 |
 | CRYPTIA-E103 | ニュース取得失敗 | RSS 障害・ネットワーク | AI はテクニカルのみで分析継続 | 5 分キャッシュ経由で自動回復 |
 | CRYPTIA-E201 | Vertex AI 呼び出し失敗 | 認証・API 無効・タイムアウト | フォールバック分析に自動切替（engine:'fallback' 表示） | Functions SA の `roles/aiplatform.user` 権限、`NUXT_GCP_PROJECT_ID` 設定を確認 |
 | CRYPTIA-E202 | AI 応答の解析失敗 | Gemini の JSON 逸脱 | 同上 | 頻発時はモデル/プロンプト見直し（`NUXT_VERTEX_MODEL`） |
@@ -20,6 +20,7 @@
 | CRYPTIA-E502 | 実トレード: 上限超過 | 1回/1日上限を超える注文 | 注文ブロック | 正常動作（安全ガード）。上限は戦略画面でなくガード設定で変更 |
 | CRYPTIA-E503 | ウォレット未接続 | Phantom 未検出・接続拒否 | 実トレード不可 | Phantom 導入 / アプリ内ブラウザ利用を案内 |
 | CRYPTIA-E504 | スワップ見積り失敗 | Jupiter 障害・流動性不足・不正ミント | 注文中断 | トークン・数量を変えて再試行。Jupiter ステータス確認 |
+| CRYPTIA-E505 | ウォレット残高取得失敗 | 公開 Solana RPC のブラウザ遮断・混雑 | 残高表示が「—」+ 警告（取引時は再検証されるため資産影響なし） | 直接取得失敗時は読み取り専用プロキシ（`/api/solana/rpc`）へ自動フォールバック。警告の案内どおり更新ボタンで再試行 |
 | CRYPTIA-E601 | Firestore 同期失敗 | ルール拒否・オフライン・未設定 | ローカル保存で継続（データ損失なし） | Firebase 設定（NUXT_PUBLIC_FIREBASE_*）、専用 DB `cryptia` の作成有無、Rules デプロイを確認 |
 | CRYPTIA-E999 | 未分類エラー | 想定外の例外 | 操作による | Cloud Logging / ブラウザコンソールのスタックトレースを確認し、エラーコードの新設を検討 |
 

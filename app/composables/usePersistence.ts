@@ -35,6 +35,9 @@ export function loadLocal<T>(key: string): Persisted<T> | null {
   }
 }
 
+/** 同期失敗のユーザー通知は 1 セッション 1 回まで（サイレント恒久失敗の防止: AUDIT-P9-1） */
+let syncFailureNotified = false
+
 /** Firestore へ非同期バックアップ（ベストエフォート） */
 async function saveRemote<T>(key: string, payload: Persisted<T>): Promise<void> {
   const ctx = await useFirebase()
@@ -48,6 +51,20 @@ async function saveRemote<T>(key: string, payload: Persisted<T>): Promise<void> 
     })
   } catch (err) {
     console.warn(`[${ERROR_CODES.SYNC_FAILED}] Firestore 同期失敗（ローカル保存は完了済み）: ${err instanceof Error ? err.message : err}`)
+    if (!syncFailureNotified) {
+      syncFailureNotified = true
+      try {
+        // 動的 import で循環依存を避ける（補助処理の失敗は主要フローを止めない: 原則4）
+        const { useUiStore } = await import('~/stores/ui')
+        useUiStore().notify(
+          'クラウド同期に失敗しました。データは端末に保存されています（端末間の引き継ぎのみ影響）',
+          'warn',
+          ERROR_CODES.SYNC_FAILED,
+        )
+      } catch {
+        /* 通知失敗は無視 */
+      }
+    }
   }
 }
 

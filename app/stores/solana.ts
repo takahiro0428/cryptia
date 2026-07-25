@@ -1,7 +1,24 @@
 import { defineStore } from 'pinia'
 import { decideDegenTrade } from '~/shared/degenAdvisor'
+import {
+  DEX_PAIRS_URL,
+  DEX_SEARCH_URL,
+  discoverFreshPairs,
+  extractSnsSignals,
+  isValidAddress,
+  toToken,
+  type DexPair,
+} from '~/shared/dexscreener'
 import { ERROR_CODES, formatError } from '~/shared/errors'
 import { mockSolanaTokens } from '~/shared/mockData'
+import {
+  scoreFreshToken,
+  SNIPE_LADDER_RULES,
+  SNIPE_MAX_AGE_HOURS,
+  type FreshTokenSignals,
+  type SnipeScore,
+} from '~/shared/snipeScoring'
+import { fitArchivesToBudget, utf8Bytes } from '~/shared/persistBudget'
 import { isTradable, rankTokens } from '~/shared/solanaScoring'
 import {
   applyDecision,
@@ -16,6 +33,7 @@ import {
 } from '~/shared/tradeEngine'
 import type {
   LadderRule,
+  Order,
   Portfolio,
   PortfolioSummary,
   SolanaToken,
@@ -28,23 +46,23 @@ import { useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
 
 const STORE_KEY = 'solana-degen'
-const DEX_SEARCH_URL = 'https://api.dexscreener.com/latest/dex/search?q=SOL'
-const DEX_PAIRS_URL = 'https://api.dexscreener.com/latest/dex/pairs/solana/'
+/** 新規トークンリストのキャッシュ有効期間 */
+const FRESH_TTL_MS = 2 * 60 * 1000
 /** スクリーニング更新間隔（DexScreener レートリミット配慮） */
 export const DEGEN_TICK_MS = 30_000
+/** 保有中の表示価格更新間隔（一時停止中も損益をリアルタイム表示する） */
+export const DISPLAY_REFRESH_MS = 10_000
+/** アーカイブ1件に保存する約定履歴の上限（Firestore ドキュメント容量保護） */
+const ARCHIVE_ORDERS_MAX = 100
+/** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
+const ARCHIVE_ORDERS_KEEP = 10
 
-export type DegenMethod = 'ai' | 'ladder'
+export type DegenMethod = 'ai' | 'ladder' | 'snipe'
 
-interface DexPair {
-  chainId?: string
-  pairAddress?: string
-  baseToken?: { address?: string; name?: string; symbol?: string }
-  priceUsd?: string
-  liquidity?: { usd?: number }
-  volume?: { h24?: number }
-  priceChange?: { h24?: number }
-  txns?: { h24?: { buys?: number; sells?: number } }
-  pairCreatedAt?: number
+export const DEGEN_METHOD_LABELS: Record<DegenMethod, string> = {
+  ladder: 'ラダー',
+  ai: 'AI 取引',
+  snipe: 'スナイプ',
 }
 
 interface PositionMeta {
@@ -57,6 +75,10 @@ interface DegenArchive {
   summary: PortfolioSummary
   method: DegenMethod
   tokenSymbols: string[]
+  /** 約定履歴（閲覧用: F-05）。容量保護のため直近セッション分のみ保持 */
+  orders?: Order[]
+  /** assetId（ペアアドレス）→ シンボルの対応（履歴表示用） */
+  symbols?: Record<string, string>
 }
 
 interface PersistedDegen {
@@ -69,30 +91,12 @@ interface PersistedDegen {
   archives: DegenArchive[]
 }
 
-function toToken(p: DexPair): SolanaToken | null {
-  if (p.chainId !== 'solana' || !p.pairAddress || !p.baseToken?.address) return null
-  const priceUsd = Number(p.priceUsd)
-  if (!Number.isFinite(priceUsd) || priceUsd <= 0) return null
-  const h24 = p.txns?.h24
-  return {
-    pairAddress: p.pairAddress,
-    baseSymbol: (p.baseToken.symbol ?? '?').slice(0, 20),
-    baseName: (p.baseToken.name ?? p.baseToken.symbol ?? '?').slice(0, 60),
-    baseAddress: p.baseToken.address,
-    priceUsd,
-    liquidityUsd: p.liquidity?.usd ?? 0,
-    volume24hUsd: p.volume?.h24 ?? 0,
-    change24hPct: p.priceChange?.h24 ?? 0,
-    ageHours: p.pairCreatedAt ? Math.max(0, (Date.now() - p.pairCreatedAt) / 3_600_000) : 0,
-    txns24h: (h24?.buys ?? 0) + (h24?.sells ?? 0),
-  }
-}
-
 /**
  * Solana 魔界トレードストア（UC-5 / F-05, F-06）。
  * - DexScreener で新興トークンをスクリーニングし、スコアリングで選定支援
- * - 取引手法: AI 取引（Vertex/ロジック） or ラダーロジック（+100%で50%利確等）
+ * - 取引手法: AI 取引（Vertex/ロジック） / ラダーロジック / 新規上場スナイプ
  * - 取引はデモ資金で実行（実資金は /trade/live のウォレット接続経由のみ）
+ * - DexScreener へ直接到達できない環境では /api/solana/* プロキシへ自動フォールバック
  */
 export const useSolanaStore = defineStore('solana', {
   state: () => ({
@@ -100,6 +104,15 @@ export const useSolanaStore = defineStore('solana', {
     loading: false,
     usingMockData: false,
     lastFetchedAt: 0,
+    /** 保有ポジション価格の最終更新時刻（リアルタイム損益表示の鮮度表示用） */
+    lastPricesAt: 0,
+    lastError: '' as string,
+    /** 新規上場ハンター: 発行直後トークンのスコア済みリスト */
+    freshTokens: [] as SnipeScore[],
+    freshLoading: false,
+    freshFetchedAt: 0,
+    /** 新規上場リストの取得失敗理由（空状態とエラーを区別して表示する） */
+    freshError: '' as string,
     portfolio: null as Portfolio | null,
     running: false,
     method: 'ladder' as DegenMethod,
@@ -112,6 +125,9 @@ export const useSolanaStore = defineStore('solana', {
     _timer: null as ReturnType<typeof setInterval> | null,
     /** セッション世代。await 中に終了/再開始された旧ティックの執行を防ぐ（ISSUE-3） */
     _session: 0,
+    /** DexScreener の取得経路。直接取得に失敗したら proxy に切替える（sticky） */
+    _dexVia: 'direct' as 'direct' | 'proxy',
+    _pricesBusy: false,
   }),
   getters: {
     ranked(state): TokenScore[] {
@@ -121,10 +137,19 @@ export const useSolanaStore = defineStore('solana', {
     recommended(): TokenScore[] {
       return this.ranked.filter((s: TokenScore) => isTradable(s)).slice(0, 5)
     },
-    tokenOf: (state) => (pairAddress: string) =>
-      state.tokens.find((t) => t.pairAddress === pairAddress),
+    /** スナイプおすすめ = 「候補」判定の上位 */
+    freshRecommended(state): SnipeScore[] {
+      return state.freshTokens.filter((s) => s.verdict === 'candidate').slice(0, 3)
+    },
+    /** スナイプ銘柄はスクリーニングリスト外のこともあるため freshTokens も探索する */
+    tokenOf: (state) => (pairAddress: string): SolanaToken | undefined =>
+      state.tokens.find((t) => t.pairAddress === pairAddress) ??
+      state.freshTokens.find((s) => s.token.pairAddress === pairAddress)?.token,
     priceMap(state): Record<string, number> {
-      return Object.fromEntries(state.tokens.map((t) => [t.pairAddress, t.priceUsd]))
+      return Object.fromEntries([
+        ...state.freshTokens.map((s) => [s.token.pairAddress, s.token.priceUsd] as const),
+        ...state.tokens.map((t) => [t.pairAddress, t.priceUsd] as const),
+      ])
     },
     summary(state): PortfolioSummary | null {
       if (!state.portfolio) return null
@@ -147,7 +172,7 @@ export const useSolanaStore = defineStore('solana', {
       this.restored = true
     },
     _persist() {
-      persist<PersistedDegen>(STORE_KEY, {
+      const payload: PersistedDegen = {
         portfolio: this.portfolio ? JSON.parse(JSON.stringify(this.portfolio)) : null,
         running: this.running,
         method: this.method,
@@ -155,14 +180,42 @@ export const useSolanaStore = defineStore('solana', {
         watchedPairs: [...this.watchedPairs],
         positionMeta: JSON.parse(JSON.stringify(this.positionMeta)),
         archives: JSON.parse(JSON.stringify(this.archives)),
-      })
+      }
+      // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）
+      payload.archives = fitArchivesToBudget(payload.archives, (a) =>
+        utf8Bytes(JSON.stringify({ ...payload, archives: a })),
+      )
+      persist<PersistedDegen>(STORE_KEY, payload)
     },
-    async fetchTokens() {
-      this.loading = this.tokens.length === 0
+    /**
+     * DexScreener 取得（直接 → 失敗時は自アプリのプロキシへフォールバック）。
+     * 一度プロキシに切替えたら以後はプロキシを使い、プロキシも失敗したら
+     * 次回は直接取得から再試行する（自己回復）。
+     */
+    async _fetchDex<T>(directUrl: string, proxyPath: string): Promise<T> {
+      if (this._dexVia === 'direct') {
+        try {
+          const res = await fetch(directUrl, { signal: AbortSignal.timeout(8_000) })
+          if (!res.ok) throw new Error(`DexScreener HTTP ${res.status}`)
+          return (await res.json()) as T
+        } catch {
+          const data = await $fetch<T>(proxyPath, { timeout: 12_000 })
+          this._dexVia = 'proxy'
+          return data
+        }
+      }
       try {
-        const res = await fetch(DEX_SEARCH_URL)
-        if (!res.ok) throw new Error(`DexScreener HTTP ${res.status}`)
-        const data = (await res.json()) as { pairs?: DexPair[] }
+        return await $fetch<T>(proxyPath, { timeout: 12_000 })
+      } catch (err) {
+        this._dexVia = 'direct'
+        throw err
+      }
+    },
+    async fetchTokens(force = false) {
+      this.loading = this.tokens.length === 0 || (force && this.usingMockData)
+      if (force) this._dexVia = 'direct'
+      try {
+        const data = await this._fetchDex<{ pairs?: DexPair[] }>(DEX_SEARCH_URL, '/api/solana/screen')
         const tokens = (data.pairs ?? [])
           .map(toToken)
           .filter((t): t is SolanaToken => t !== null)
@@ -177,10 +230,15 @@ export const useSolanaStore = defineStore('solana', {
         )
         this.tokens = [...tokens, ...held]
         this.usingMockData = false
+        this.lastError = ''
         this.lastFetchedAt = Date.now()
-        await this.refreshHeldPairs()
+        this.lastPricesAt = Date.now()
+        // 検索リスト外の保有ペア（スナイプ対象等）は held 引き継ぎで価格が古いままのため、
+        // 必ず個別取得で置き換える（凍結価格でラダー/AI が執行される問題の防止: ISSUE-P9-H1）
+        await this.refreshDisplayPrices()
       } catch (err) {
-        console.warn(`[${ERROR_CODES.DEX_FETCH_FAILED}] ${err instanceof Error ? err.message : err}`)
+        this.lastError = err instanceof Error ? err.message : String(err)
+        console.warn(`[${ERROR_CODES.DEX_FETCH_FAILED}] ${this.lastError}`)
         if (this.tokens.length === 0) {
           this.tokens = mockSolanaTokens()
           this.usingMockData = true
@@ -190,26 +248,98 @@ export const useSolanaStore = defineStore('solana', {
         this.loading = false
       }
     },
-    /** 保有中でリストから消えたペアの価格を個別取得する（モック時はスキップ） */
-    async refreshHeldPairs() {
-      if (this.usingMockData) return
-      const missing = this.watchedPairs.filter(
-        (addr) => !this.tokens.some((t) => t.pairAddress === addr),
-      )
-      if (missing.length === 0) return
+    /**
+     * 保有ペア・監視ペアの価格を個別取得して置き換える（replace-or-push）。
+     * 呼び出し元は 2 系統:
+     *   - tick()（30s・バックグラウンドでも実行）: 検索リスト外ペアの凍結価格防止（ISSUE-P9-H1）
+     *   - 画面の表示タイマー（10s）: 一時停止中・復元直後の損益リアルタイム表示
+     */
+    async refreshDisplayPrices() {
+      if (this._pricesBusy || this.usingMockData) return
+      // セッションなし（portfolio=null）の間は無駄な取得をしない（クォータ浪費防止）
+      if (!this.portfolio) return
+      const targets = new Set<string>(this.watchedPairs)
+      for (const p of this.portfolio.positions) targets.add(p.assetId)
+      const addrs = [...targets].filter(isValidAddress).slice(0, 30)
+      if (addrs.length === 0) return
+      this._pricesBusy = true
       try {
-        const res = await fetch(`${DEX_PAIRS_URL}${missing.join(',')}`)
-        if (!res.ok) return
-        const data = (await res.json()) as { pairs?: DexPair[] }
+        const data = await this._fetchDex<{ pairs?: DexPair[] }>(
+          `${DEX_PAIRS_URL}${addrs.join(',')}`,
+          `/api/solana/pairs?addrs=${addrs.join(',')}`,
+        )
         for (const p of data.pairs ?? []) {
           const token = toToken(p)
-          if (token) this.tokens.push(token)
+          if (!token) continue
+          const i = this.tokens.findIndex((t) => t.pairAddress === token.pairAddress)
+          if (i >= 0) this.tokens[i] = token
+          else this.tokens.push(token)
+          const fresh = this.freshTokens.find((s) => s.token.pairAddress === token.pairAddress)
+          if (fresh) fresh.token.priceUsd = token.priceUsd
         }
+        this.lastPricesAt = Date.now()
       } catch {
-        /* 個別取得失敗は次ティックで再試行（原則4） */
+        /* 表示更新の失敗は次回更新で再試行（原則4） */
+      } finally {
+        this._pricesBusy = false
       }
     },
-    /** セッション開始。ladder は即時等分エントリー、ai はティックごとに判断 */
+    /**
+     * 新規上場ハンター: 発行直後（48h 以内）トークンの発見とシグナル収集（F-06）。
+     * サーバー経由（/api/solana/fresh）で mint/freeze 権限・再発行照合まで取得し、
+     * サーバー未達時はブラウザ直接取得（SNS・流動性のみ）へフォールバックする。
+     */
+    async fetchFreshTokens(force = false) {
+      if (this.freshLoading) return
+      if (!force && Date.now() - this.freshFetchedAt < FRESH_TTL_MS) return
+      this.freshLoading = true
+      try {
+        let items: { token: SolanaToken; signals: FreshTokenSignals }[]
+        try {
+          const data = await $fetch<{ items: { token: SolanaToken; signals: FreshTokenSignals }[] }>(
+            '/api/solana/fresh',
+            { timeout: 25_000 },
+          )
+          items = data.items
+        } catch {
+          items = await this._fetchFreshDirect()
+        }
+        const rank: Record<SnipeScore['verdict'], number> = { candidate: 0, caution: 1, avoid: 2 }
+        this.freshTokens = items
+          .map((i) => scoreFreshToken(i.token, i.signals))
+          .sort((a, b) => rank[a.verdict] - rank[b.verdict] || b.total - a.total)
+        this.freshFetchedAt = Date.now()
+        this.freshError = ''
+      } catch (err) {
+        this.freshError = err instanceof Error ? err.message : String(err)
+        console.warn(`[${ERROR_CODES.DEX_FETCH_FAILED}] 新規上場リスト取得失敗: ${this.freshError}`)
+      } finally {
+        this.freshLoading = false
+      }
+    },
+    /** フォールバック: ブラウザ直接取得（mint 権限・再発行照合は未取得=null になる） */
+    async _fetchFreshDirect(): Promise<{ token: SolanaToken; signals: FreshTokenSignals }[]> {
+      const discovered = await discoverFreshPairs(async <T>(url: string): Promise<T> => {
+        const res = await fetch(url, { signal: AbortSignal.timeout(8_000) })
+        if (!res.ok) throw new Error(`DexScreener HTTP ${res.status}`)
+        return (await res.json()) as T
+      }, SNIPE_MAX_AGE_HOURS)
+      return discovered.map(({ pair, token, profile }) => {
+        const h24 = pair.txns?.h24
+        return {
+          token,
+          signals: {
+            ...extractSnsSignals(pair.info, profile?.links),
+            mintAuthorityRenounced: null,
+            freezeAuthorityAbsent: null,
+            duplicateCount: null,
+            buys24h: h24?.buys ?? 0,
+            sells24h: h24?.sells ?? 0,
+          },
+        }
+      })
+    },
+    /** セッション開始。ladder/snipe は即時等分エントリー、ai はティックごとに判断 */
     async start(allocatedUsd: number, pairAddresses: string[], method: DegenMethod) {
       const ui = useUiStore()
       if (this.running) {
@@ -226,10 +356,13 @@ export const useSolanaStore = defineStore('solana', {
         this.portfolio = createPortfolio(allocatedUsd)
         this.watchedPairs = [...pairAddresses]
         this.method = method
+        this.ladderRules =
+          method === 'snipe' ? [...SNIPE_LADDER_RULES] : [...DEFAULT_LADDER_RULES]
         this.positionMeta = {}
 
-        if (method === 'ladder') {
-          // ラダー方式: 割当資金を等分して即時エントリーし、以後は出口ルールのみ実行
+        if (method !== 'ai') {
+          // ラダー/スナイプ方式: 割当資金を等分して即時エントリーし、以後は出口ルールのみ実行
+          const strategyName = method === 'snipe' ? '新規上場スナイプ' : 'ラダーロジック'
           const perToken = allocatedUsd / pairAddresses.length
           for (const addr of pairAddresses) {
             const token = this.tokenOf(addr)
@@ -239,8 +372,11 @@ export const useSolanaStore = defineStore('solana', {
               side: 'buy',
               notionalUsd: perToken,
               priceUsd: token.priceUsd,
-              reason: `ラダー戦略の初期エントリー（${token.baseSymbol} へ等分投入）`,
-              strategy: 'ラダーロジック',
+              reason:
+                method === 'snipe'
+                  ? `スナイプ戦略の初期エントリー（新規上場 ${token.baseSymbol} へ等分投入）`
+                  : `ラダー戦略の初期エントリー（${token.baseSymbol} へ等分投入）`,
+              strategy: strategyName,
             })
             this.portfolio = result.portfolio
             this.positionMeta[addr] = { entryPriceUsd: token.priceUsd, triggered: [] }
@@ -249,7 +385,9 @@ export const useSolanaStore = defineStore('solana', {
 
         this.startTicking()
         this._persist()
-        ui.notify(`魔界トレードを開始しました（${method === 'ladder' ? 'ラダーロジック' : 'AI 取引'} / $${allocatedUsd.toLocaleString()}）`)
+        const label =
+          method === 'ladder' ? 'ラダーロジック' : method === 'snipe' ? '新規上場スナイプ' : 'AI 取引'
+        ui.notify(`魔界トレードを開始しました（${label} / $${allocatedUsd.toLocaleString()}）`)
       } catch (err) {
         const { code, message } = formatError(err)
         ui.notify(message, 'error', code)
@@ -276,14 +414,27 @@ export const useSolanaStore = defineStore('solana', {
         this.portfolio = null
         return
       }
-      const symbols = this.watchedPairs.map((a) => this.tokenOf(a)?.baseSymbol ?? a.slice(0, 6))
+      // 履歴表示用にシンボル対応を保存する（トークンリスト変動後も解決できるように）
+      const symbols: Record<string, string> = {}
+      for (const order of this.portfolio.orders) {
+        const token = this.tokenOf(order.assetId)
+        if (token) symbols[order.assetId] = token.baseSymbol
+      }
+      const tokenSymbols = this.watchedPairs.map(
+        (a) => this.tokenOf(a)?.baseSymbol ?? a.slice(0, 6),
+      )
       this.archives.unshift({
         endedAt: Date.now(),
         summary: summarize(this.portfolio, this.priceMap),
         method: this.method,
-        tokenSymbols: symbols,
+        tokenSymbols,
+        orders: this.portfolio.orders.slice(-ARCHIVE_ORDERS_MAX),
+        symbols,
       })
-      this.archives = this.archives.slice(0, 20)
+      // 容量保護: 古いアーカイブは約定明細を落としてサマリーのみ残す（原則2: 記録は保護）
+      this.archives = this.archives
+        .slice(0, 20)
+        .map((a, i) => (i < ARCHIVE_ORDERS_KEEP ? a : { ...a, orders: undefined }))
       this._session++
       this.portfolio = null
       this.positionMeta = {}
@@ -292,7 +443,7 @@ export const useSolanaStore = defineStore('solana', {
       this.stop()
       this.archiveCurrent()
       this._persist()
-      useUiStore().notify('魔界トレードのセッションを終了し、結果を保存しました')
+      useUiStore().notify('魔界トレードのセッションを終了し、結果を過去セッションに保存しました')
     },
     async tick() {
       if (this.ticking || !this.running || !this.portfolio) return
@@ -302,7 +453,7 @@ export const useSolanaStore = defineStore('solana', {
         await this.fetchTokens()
         // await 中にセッションが終了/再開始されていたら旧判断を執行しない（ISSUE-3）
         if (this._session !== session || !this.running || !this.portfolio) return
-        const strategy = useStrategyStore().activeDoc
+        const strategy = useStrategyStore().docFor('solana')
         const prices = this.priceMap
 
         for (const addr of [...this.watchedPairs]) {
@@ -311,10 +462,12 @@ export const useSolanaStore = defineStore('solana', {
           if (!token || token.priceUsd <= 0) continue
           const pos = positionOf(this.portfolio, addr)
 
-          if (this.method === 'ladder') {
+          if (this.method !== 'ai') {
+            // ラダー/スナイプ: エントリー価格基準の出口ルールを機械的に執行
             if (!pos) continue
             const meta = this.positionMeta[addr]
             if (!meta) continue
+            const strategyName = this.method === 'snipe' ? '新規上場スナイプ' : 'ラダーロジック'
             const fired = checkLadder(meta.entryPriceUsd, token.priceUsd, this.ladderRules, meta.triggered)
             for (const { index, rule } of fired) {
               const current = positionOf(this.portfolio, addr)
@@ -335,7 +488,7 @@ export const useSolanaStore = defineStore('solana', {
                     rule.triggerPct >= 0
                       ? `ラダー利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`
                       : `ラダー損切り: ${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`,
-                  strategy: 'ラダーロジック',
+                  strategy: strategyName,
                 })
                 this.portfolio = result.portfolio
                 meta.triggered.push(index)
