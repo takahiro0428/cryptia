@@ -38,6 +38,13 @@ export function fmtTime(ts: number): string {
 }
 
 /** 相対時間（例: 3分前） */
+/** トークンの発行経過時間の表示（例: 45分 / 6時間 / 1.5日） */
+export function fmtTokenAge(hours: number): string {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}分`
+  if (hours < 24) return `${hours.toFixed(0)}時間`
+  return `${(hours / 24).toFixed(1)}日`
+}
+
 export function fmtAgo(ts: number, now = Date.now()): string {
   const sec = Math.max(0, Math.floor((now - ts) / 1000))
   if (sec < 60) return `${sec}秒前`

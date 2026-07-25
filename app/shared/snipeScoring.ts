@@ -29,6 +29,13 @@ export interface FreshTokenSignals {
 
 export type SnipeVerdict = 'candidate' | 'caution' | 'avoid'
 
+/** 判定の表示定義（ラベル + バッジ CSS クラス）。カード・詳細パネルで共通利用 */
+export const SNIPE_VERDICT_LABELS: Record<SnipeVerdict, { label: string; cls: string }> = {
+  candidate: { label: '候補', cls: 'badge-up' },
+  caution: { label: '要注意', cls: 'badge-warn' },
+  avoid: { label: '回避', cls: 'badge-down' },
+}
+
 export interface SnipeScore {
   token: SolanaToken
   signals: FreshTokenSignals

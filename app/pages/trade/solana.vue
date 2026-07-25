@@ -34,6 +34,11 @@ const autoMaxPositions = ref(5)
 const autoAllowCaution = ref(false)
 /** 展開中の過去セッション（約定履歴の閲覧: F-05） */
 const expandedArchive = ref<number | null>(null)
+/** 展開中の保有ポジション（その場詳細の閲覧。見たいときだけ押下で可視化） */
+const expandedPosition = ref<string | null>(null)
+function togglePosition(pairAddress: string) {
+  expandedPosition.value = expandedPosition.value === pairAddress ? null : pairAddress
+}
 
 /** 新規上場リストを使う手法か（スナイプ / 自動スナイプ） */
 const usesFresh = (m: DegenMethod) => m === 'snipe' || m === 'auto-snipe'
@@ -82,10 +87,21 @@ function confirmEndSession() {
   if (window.confirm('魔界トレードのセッションを終了しますか？\n実行中の自動取引が停止し、結果は過去セッション（約定履歴つき）に保存されます。')) {
     solana.endSession()
     expandedArchive.value = null
+    expandedPosition.value = null
   }
 }
 
 const equityValues = computed(() => solana.portfolio?.equityCurve.map((p) => p.equityUsd) ?? [])
+
+// 全決済で行が消えた展開状態を掃除する（再エントリー時の無操作自動展開を防ぐ）
+watch(
+  () => (solana.portfolio?.positions ?? []).map((p) => p.assetId),
+  (assetIds) => {
+    if (expandedPosition.value && !assetIds.includes(expandedPosition.value)) {
+      expandedPosition.value = null
+    }
+  },
+)
 const positionRows = computed(() => {
   return (solana.portfolio?.positions ?? []).map((p) => {
     const token = solana.tokenOf(p.assetId)
@@ -332,12 +348,22 @@ useHead({ title: 'Solana魔界 | Cryptia' })
 
       <h3 style="margin-top: 12px">保有ポジション</h3>
       <p v-if="positionRows.length === 0" class="dim small">ポジションなし</p>
-      <div v-for="p in positionRows" :key="p.pairAddress" class="pos-row small">
-        <span class="bold">{{ p.symbol }}</span>
-        <span class="mono">{{ fmtUsd(p.valueUsd) }}</span>
-        <span class="mono" :class="p.pnlPct >= 0 ? 'up' : 'down'">{{ fmtPct(p.pnlPct) }}</span>
-        <span v-if="solana.method !== 'ai'" class="xs faint">ラダー発動 {{ p.triggeredCount }}/{{ solana.ladderRules.length }}</span>
-      </div>
+      <p v-else class="xs faint" style="margin: 0 0 4px">行をタップすると、そのトークンの詳細をその場で表示します。</p>
+      <template v-for="p in positionRows" :key="p.pairAddress">
+        <button
+          class="pos-row small pos-btn"
+          type="button"
+          :aria-expanded="expandedPosition === p.pairAddress"
+          @click="togglePosition(p.pairAddress)"
+        >
+          <span class="bold">{{ p.symbol }}</span>
+          <span class="mono">{{ fmtUsd(p.valueUsd) }}</span>
+          <span class="mono" :class="p.pnlPct >= 0 ? 'up' : 'down'">{{ fmtPct(p.pnlPct) }}</span>
+          <span v-if="solana.method !== 'ai'" class="xs faint">ラダー発動 {{ p.triggeredCount }}/{{ solana.ladderRules.length }}</span>
+          <component :is="expandedPosition === p.pairAddress ? ChevronUp : ChevronDown" :size="15" class="dim chev" aria-hidden="true" />
+        </button>
+        <SolanaPositionDetail v-if="expandedPosition === p.pairAddress" :pair-address="p.pairAddress" />
+      </template>
 
       <div class="controls">
         <button v-if="solana.running" class="btn" type="button" @click="solana.stop()">
@@ -421,6 +447,21 @@ useHead({ title: 'Solana魔界 | Cryptia' })
 .controls { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .pos-row { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .pos-row:last-child { border-bottom: none; }
+.pos-btn {
+  width: 100%;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  padding: 8px 0;
+  /* font ショートハンドは .small の font-size を打ち消すため個別指定 */
+  font-family: inherit;
+  line-height: inherit;
+}
+.pos-btn .chev { margin-left: auto; }
 .archive-row {
   display: flex;
   gap: 10px;

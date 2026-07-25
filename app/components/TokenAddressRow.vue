@@ -2,6 +2,9 @@
 import { Check, ClipboardCopy, Eye, EyeOff } from '@lucide/vue'
 import { useUiStore } from '~/stores/ui'
 
+/** インスタンス単位の連番（DOM id の一意性担保） */
+let instanceSeq = 0
+
 /**
  * トークンの CA（コントラクトアドレス = ミント）をその場で確認・コピーする行。
  * ページ遷移せずカード内で完結する（トークンカード共通部品）。
@@ -15,8 +18,12 @@ let copyTimer: ReturnType<typeof setTimeout> | null = null
 
 const caLabel = computed(() => props.label ?? 'CA')
 const short = computed(() => `${props.address.slice(0, 4)}…${props.address.slice(-4)}`)
-/** 展開領域と aria-controls で紐付けるための一意 ID（アドレスはカード単位で一意） */
-const fullId = computed(() => `ca-full-${props.address.slice(0, 12)}`)
+/**
+ * 展開領域と aria-controls で紐付けるための一意 ID。
+ * 同一アドレスが複数箇所（カードと詳細パネル等）に表示されても
+ * DOM id が衝突しないよう、インスタンス連番を含める。
+ */
+const fullId = `ca-full-${++instanceSeq}-${props.address.slice(0, 8)}`
 
 async function copy() {
   try {

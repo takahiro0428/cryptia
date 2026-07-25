@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { AtSign, Ban, CircleCheck, Globe, MessageCircle, TriangleAlert } from '@lucide/vue'
-import { fmtPct, fmtUsd } from '~/shared/format'
-import type { SnipeScore } from '~/shared/snipeScoring'
+import { fmtPct, fmtTokenAge, fmtUsd } from '~/shared/format'
+import { SNIPE_VERDICT_LABELS, type SnipeScore } from '~/shared/snipeScoring'
 
 // 新規上場ハンター（スナイプ）のトークンカード（F-06）
 const props = defineProps<{ score: SnipeScore; selected?: boolean }>()
@@ -9,22 +9,11 @@ defineEmits<{ select: [pairAddress: string] }>()
 
 const t = computed(() => props.score.token)
 const s = computed(() => props.score.signals)
-
-const VERDICT = {
-  candidate: { label: '候補', cls: 'badge-up' },
-  caution: { label: '要注意', cls: 'badge-warn' },
-  avoid: { label: '回避', cls: 'badge-down' },
-} as const
+const VERDICT = SNIPE_VERDICT_LABELS
 
 const scoreColor = computed(() =>
   props.score.total >= 60 ? 'var(--up)' : props.score.total >= 40 ? 'var(--warn)' : 'var(--down)',
 )
-
-function fmtAge(hours: number): string {
-  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))}分`
-  if (hours < 24) return `${hours.toFixed(0)}時間`
-  return `${(hours / 24).toFixed(1)}日`
-}
 </script>
 
 <template>
@@ -41,7 +30,7 @@ function fmtAge(hours: number): string {
         <span>{{ fmtUsd(t.priceUsd) }}</span>
         <span :class="t.change24hPct >= 0 ? 'up' : 'down'">{{ fmtPct(t.change24hPct) }}</span>
         <span class="dim">流動性 {{ fmtUsd(t.liquidityUsd) }}</span>
-        <span class="dim">発行 {{ fmtAge(t.ageHours) }}前</span>
+        <span class="dim">発行 {{ fmtTokenAge(t.ageHours) }}前</span>
       </div>
 
       <!-- 選定シグナル（SNS / dev 情報 / 再発行） -->
