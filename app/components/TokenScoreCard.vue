@@ -15,51 +15,64 @@ const scoreColor = computed(() =>
 </script>
 
 <template>
-  <button class="token-card" :class="{ selected }" type="button" :aria-pressed="!!selected" @click="$emit('select', t.pairAddress)">
-    <div class="head">
-      <span class="bold">{{ t.baseSymbol }}</span>
-      <span class="xs dim name">{{ t.baseName }}</span>
-      <span class="score mono bold" :style="{ color: scoreColor }">{{ score.total }}</span>
-    </div>
-    <div class="row mono xs">
-      <span>{{ fmtUsd(t.priceUsd) }}</span>
-      <span :class="t.change24hPct >= 0 ? 'up' : 'down'">{{ fmtPct(t.change24hPct) }}</span>
-      <span class="dim">流動性 {{ fmtUsd(t.liquidityUsd) }}</span>
-      <span class="dim">出来高 {{ fmtUsd(t.volume24hUsd) }}</span>
-    </div>
-    <div class="bars" aria-hidden="true">
-      <div v-for="(v, k) in score.breakdown" :key="k" class="bar-wrap" :title="String(k)">
-        <div class="bar" :style="{ width: `${v}%` }" />
+  <!-- ネスト不可の button を避けるため、選択操作と CA 操作を別要素に分離する -->
+  <div class="token-card" :class="{ selected }">
+    <button class="card-main" type="button" :aria-pressed="!!selected" @click="$emit('select', t.pairAddress)">
+      <div class="head">
+        <span class="bold">{{ t.baseSymbol }}</span>
+        <span class="xs dim name">{{ t.baseName }}</span>
+        <span class="score mono bold" :style="{ color: scoreColor }">{{ score.total }}</span>
       </div>
+      <div class="row mono xs">
+        <span>{{ fmtUsd(t.priceUsd) }}</span>
+        <span :class="t.change24hPct >= 0 ? 'up' : 'down'">{{ fmtPct(t.change24hPct) }}</span>
+        <span class="dim">流動性 {{ fmtUsd(t.liquidityUsd) }}</span>
+        <span class="dim">出来高 {{ fmtUsd(t.volume24hUsd) }}</span>
+      </div>
+      <div class="bars" aria-hidden="true">
+        <div v-for="(v, k) in score.breakdown" :key="k" class="bar-wrap" :title="String(k)">
+          <div class="bar" :style="{ width: `${v}%` }" />
+        </div>
+      </div>
+      <div class="row xs">
+        <span class="badge" :class="tradable ? 'badge-up' : 'badge-down'">
+          {{ tradable ? '取引適格' : '基準未達' }}
+        </span>
+        <span class="dim">{{ t.ageHours < 24 ? `${t.ageHours.toFixed(0)}h` : `${(t.ageHours / 24).toFixed(0)}日` }}</span>
+        <span v-if="score.warnings.length > 0" class="badge badge-warn" style="display: inline-flex; align-items: center; gap: 3px">
+          <TriangleAlert :size="12" aria-hidden="true" /> {{ score.warnings.length }}
+        </span>
+      </div>
+      <div v-if="score.warnings.length > 0" class="xs down warnings">
+        {{ score.warnings[0] }}<span v-if="score.warnings.length > 1"> 他{{ score.warnings.length - 1 }}件</span>
+      </div>
+    </button>
+    <div class="ca-area">
+      <TokenAddressRow :address="t.baseAddress" />
     </div>
-    <div class="row xs">
-      <span class="badge" :class="tradable ? 'badge-up' : 'badge-down'">
-        {{ tradable ? '取引適格' : '基準未達' }}
-      </span>
-      <span class="dim">{{ t.ageHours < 24 ? `${t.ageHours.toFixed(0)}h` : `${(t.ageHours / 24).toFixed(0)}日` }}</span>
-      <span v-if="score.warnings.length > 0" class="badge badge-warn" style="display: inline-flex; align-items: center; gap: 3px">
-        <TriangleAlert :size="12" aria-hidden="true" /> {{ score.warnings.length }}
-      </span>
-    </div>
-    <div v-if="score.warnings.length > 0" class="xs down warnings">
-      {{ score.warnings[0] }}<span v-if="score.warnings.length > 1"> 他{{ score.warnings.length - 1 }}件</span>
-    </div>
-  </button>
+  </div>
 </template>
 
 <style scoped>
 .token-card {
-  display: block;
-  width: 100%;
-  text-align: left;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 14px;
   color: var(--text);
-  cursor: pointer;
 }
 .token-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card-main {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 12px 14px 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ca-area { padding: 0 14px 10px; }
 .head { display: flex; align-items: baseline; gap: 8px; }
 .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .score { font-size: 1.2rem; }
