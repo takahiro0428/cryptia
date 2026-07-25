@@ -115,7 +115,10 @@ const ladderLines = computed(() => {
       <span class="faint">監査判定:</span>
       <span class="badge" :class="VERDICT[freshScore.verdict].cls">{{ VERDICT[freshScore.verdict].label }}</span>
       <span class="mono dim">スコア {{ freshScore.total }}</span>
-      <span v-if="solana.freshFetchedAt" class="faint">（{{ fmtAgo(solana.freshFetchedAt) }}時点）</span>
+      <!-- 時点はプール全体の更新時刻ではなく、この銘柄を発見フィードで最後に確認した時刻 -->
+      <span v-if="solana.freshSeenAt[pairAddress] ?? solana.freshFetchedAt" class="faint">
+        （{{ fmtAgo(solana.freshSeenAt[pairAddress] ?? solana.freshFetchedAt) }}時点）
+      </span>
     </div>
 
     <!-- CA の確認・コピー（トークンカードと同じ共通部品） -->

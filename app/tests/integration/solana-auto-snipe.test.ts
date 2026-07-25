@@ -135,6 +135,44 @@ describe('自動スナイプ: 監視 → 監査 → 随時エントリー', () =
     expect(loose.portfolio!.positions).toHaveLength(1)
   })
 
+  it('発見フィードで5分以内に確認できていないエントリーは執行対象にしない（鮮度ゲート）', async () => {
+    const staleSeen = freshScore()
+    const freshSeen = freshScore()
+    const store = setupStore([staleSeen, freshSeen], 2)
+    // staleSeen はフィード落ちして 10 分未確認、freshSeen は直近確認
+    store.freshSeenAt = {
+      [staleSeen.token.pairAddress]: Date.now() - 10 * 60 * 1000,
+      [freshSeen.token.pairAddress]: Date.now(),
+    }
+    await store._autoSnipeEntries(store._session)
+    expect(store.portfolio!.positions).toHaveLength(1)
+    expect(positionOf(store.portfolio!, freshSeen.token.pairAddress)).toBeTruthy()
+    expect(positionOf(store.portfolio!, staleSeen.token.pairAddress)).toBeUndefined()
+  })
+
+  it('再エントリー防止はミント単位（代表ペアが変わっても同一トークンへ再エントリーしない）', async () => {
+    const first = freshScore()
+    const store = setupStore([first], 2)
+    await store._autoSnipeEntries(store._session)
+    expect(store.portfolio!.positions).toHaveLength(1)
+
+    // 全決済 + 同一ミントの別ペアがプールに現れた状態を再現
+    store.portfolio = {
+      ...store.portfolio!,
+      cashUsd: store.portfolio!.cashUsd + 500,
+      positions: [],
+    }
+    const samePairDifferentPool = freshScore({
+      pairAddress: 'PAIRmigrated1111111111111111111111111111111'.slice(0, 44),
+      baseAddress: first.token.baseAddress,
+    })
+    store.freshTokens = [samePairDifferentPool]
+    store.freshFetchedAt = Date.now()
+    store.freshSeenAt = { [samePairDifferentPool.token.pairAddress]: Date.now() }
+    await store._autoSnipeEntries(store._session)
+    expect(store.portfolio!.positions).toHaveLength(0)
+  })
+
   it('モックデータ中・監視データが古い場合はエントリーしない（実勢乖離の防止）', async () => {
     const good = freshScore()
 

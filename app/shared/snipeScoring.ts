@@ -49,6 +49,56 @@ export interface SnipeScore {
 /** スナイプ対象とみなす最大ペア年齢（時間） */
 export const SNIPE_MAX_AGE_HOURS = 48
 
+/** ローリング監視プールの保持上限（発見の蓄積。表示はおすすめ上位のみ） */
+export const FRESH_POOL_MAX = 50
+/** 画面に表示するおすすめ上位件数 */
+export const FRESH_DISPLAY_MAX = 10
+
+export interface FreshPoolEntry {
+  score: SnipeScore
+  /** 発見フィードで最後に確認した時刻（プールの経時失効判定に使用） */
+  lastSeenAt: number
+}
+
+/**
+ * ローリング監視プールのマージ（固定スナップショットではなく蓄積型の監視）。
+ * - 重複排除は**ミント（baseAddress）単位**。新規トークンは 48h 窓内に代表プールが
+ *   移り変わる（pump.fun → Raydium 移行等）ため、pairAddress キーだと同一トークンが
+ *   複数枠を占有し、自動スナイプの二重エントリー経路になる
+ * - 新規発見はプールへ追加、既知トークンは最新の情報・スコアへ置換する
+ * - フィードから外れたトークンも 48h 窓の間は監視を継続する
+ *   （経過時間 = 最終確認時点の年齢 + 最終確認からの経過で失効判定）
+ * - おすすめ順（判定 → スコア）で上限件数まで保持する。ただし今サイクルの新規発見は
+ *   優先残留させる（プール満杯で新着が一度も監査されず即追い出されるのを防ぐ）
+ */
+export function mergeFreshPool(
+  existing: FreshPoolEntry[],
+  incoming: SnipeScore[],
+  now: number,
+  maxAgeHours = SNIPE_MAX_AGE_HOURS,
+  cap = FRESH_POOL_MAX,
+): FreshPoolEntry[] {
+  const byMint = new Map(existing.map((e) => [e.score.token.baseAddress, e]))
+  const incomingMints = new Set<string>()
+  for (const score of incoming) {
+    byMint.set(score.token.baseAddress, { score, lastSeenAt: now })
+    incomingMints.add(score.token.baseAddress)
+  }
+  const rank: Record<SnipeVerdict, number> = { candidate: 0, caution: 1, avoid: 2 }
+  const recommend = (a: FreshPoolEntry, b: FreshPoolEntry) =>
+    rank[a.score.verdict] - rank[b.score.verdict] || b.score.total - a.score.total
+  const alive = [...byMint.values()]
+    .filter((e) => e.score.token.ageHours + (now - e.lastSeenAt) / 3_600_000 <= maxAgeHours)
+    .sort(recommend)
+  if (alive.length <= cap) return alive
+  // 今サイクル確認分を優先残留させたうえで、残枠をおすすめ順に埋める
+  const freshFirst = [
+    ...alive.filter((e) => incomingMints.has(e.score.token.baseAddress)),
+    ...alive.filter((e) => !incomingMints.has(e.score.token.baseAddress)),
+  ]
+  return freshFirst.slice(0, cap).sort(recommend)
+}
+
 /**
  * 利益確保型ラダー（スナイプ既定）: 早期に元本を回収しつつムーンバッグを残す。
  * 目標配分（初期数量比）: +50% で 30% 利確（初動回収）→ +100% で 30% → +300% で 20% →

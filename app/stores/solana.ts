@@ -12,6 +12,8 @@ import {
 import { ERROR_CODES, formatError } from '~/shared/errors'
 import { mockSolanaTokens } from '~/shared/mockData'
 import {
+  FRESH_DISPLAY_MAX,
+  mergeFreshPool,
   passesMinimalAudit,
   scoreFreshToken,
   SNIPE_LADDER_RULES,
@@ -117,9 +119,10 @@ interface PersistedDegen {
   watchedPairs: string[]
   positionMeta: Record<string, PositionMeta>
   archives: DegenArchive[]
-  /** 自動スナイプの設定・エントリー済みペア（追加フィールド: 旧データは既定値で復元） */
+  /** 自動スナイプの設定・エントリー済みペア/ミント（追加フィールド: 旧データは既定値で復元） */
   autoSnipe?: AutoSnipeConfig
   enteredPairs?: string[]
+  enteredMints?: string[]
 }
 
 /**
@@ -138,8 +141,14 @@ export const useSolanaStore = defineStore('solana', {
     /** 保有ポジション価格の最終更新時刻（リアルタイム損益表示の鮮度表示用） */
     lastPricesAt: 0,
     lastError: '' as string,
-    /** 新規上場ハンター: 発行直後トークンのスコア済みリスト */
+    /**
+     * 新規上場ハンター: ローリング監視プール（固定スナップショットではなく蓄積型）。
+     * 新規発行トークンを随時追加し、48h 窓・上限 FRESH_POOL_MAX で保持する。
+     * おすすめ順ソート済み。表示は上位 FRESH_DISPLAY_MAX 件（freshDisplay getter）
+     */
     freshTokens: [] as SnipeScore[],
+    /** 各プールエントリーを発見フィードで最後に確認した時刻（経時失効判定用） */
+    freshSeenAt: {} as Record<string, number>,
     freshLoading: false,
     freshFetchedAt: 0,
     /** 新規上場リストの取得失敗理由（空状態とエラーを区別して表示する） */
@@ -155,6 +164,11 @@ export const useSolanaStore = defineStore('solana', {
     autoSnipe: { ...DEFAULT_AUTO_SNIPE } as AutoSnipeConfig,
     /** 自動スナイプで既にエントリーしたペア（全決済後の再エントリーを防ぐ） */
     enteredPairs: [] as string[],
+    /**
+     * エントリー済みミント（トークン単位の再エントリー防止）。
+     * 代表プールが移り変わっても同一トークンへの二重エントリーを防ぐ
+     */
+    enteredMints: [] as string[],
     ticking: false,
     restored: false,
     _timer: null as ReturnType<typeof setInterval> | null,
@@ -175,6 +189,10 @@ export const useSolanaStore = defineStore('solana', {
     /** スナイプおすすめ = 「候補」判定の上位 */
     freshRecommended(state): SnipeScore[] {
       return state.freshTokens.filter((s) => s.verdict === 'candidate').slice(0, 3)
+    },
+    /** 画面表示用: 監視プールのおすすめ上位（監視自体はプール全体で継続する） */
+    freshDisplay(state): SnipeScore[] {
+      return state.freshTokens.slice(0, FRESH_DISPLAY_MAX)
     },
     /** 自動スナイプ: 現在の監査基準を通過している新規上場トークン数（監視ステータス表示用） */
     freshAuditPassedCount(state): number {
@@ -211,6 +229,7 @@ export const useSolanaStore = defineStore('solana', {
         // 復元時も開始時と同じクランプを通す（別バージョン・改変データへの防御）
         this.autoSnipe = saved.autoSnipe ? normalizeAutoSnipe(saved.autoSnipe) : { ...DEFAULT_AUTO_SNIPE }
         this.enteredPairs = saved.enteredPairs ?? []
+        this.enteredMints = saved.enteredMints ?? []
         if (saved.running && this.portfolio) this.startTicking()
       }
       this.restored = true
@@ -226,6 +245,7 @@ export const useSolanaStore = defineStore('solana', {
         archives: JSON.parse(JSON.stringify(this.archives)),
         autoSnipe: { ...this.autoSnipe },
         enteredPairs: [...this.enteredPairs],
+        enteredMints: [...this.enteredMints],
       }
       // Firestore ドキュメント上限（256KB）に収まることを実測で保証する（AUDIT-P9-1）
       payload.archives = fitArchivesToBudget(payload.archives, (a) =>
@@ -388,11 +408,22 @@ export const useSolanaStore = defineStore('solana', {
         } catch {
           items = await this._fetchFreshDirect()
         }
-        const rank: Record<SnipeScore['verdict'], number> = { candidate: 0, caution: 1, avoid: 2 }
-        this.freshTokens = items
-          .map((i) => scoreFreshToken(i.token, i.signals))
-          .sort((a, b) => rank[a.verdict] - rank[b.verdict] || b.total - a.total)
-        this.freshFetchedAt = Date.now()
+        // ローリング監視プールへマージ（新規発行を随時追加・既知は最新情報へ置換・48h窓で失効）
+        const now = Date.now()
+        const incoming = items.map((i) => scoreFreshToken(i.token, i.signals))
+        const pool = mergeFreshPool(
+          this.freshTokens.map((score) => ({
+            score,
+            lastSeenAt: this.freshSeenAt[score.token.pairAddress] ?? now,
+          })),
+          incoming,
+          now,
+        )
+        this.freshTokens = pool.map((e) => e.score)
+        this.freshSeenAt = Object.fromEntries(
+          pool.map((e) => [e.score.token.pairAddress, e.lastSeenAt]),
+        )
+        this.freshFetchedAt = now
         this.freshError = ''
       } catch (err) {
         this.freshError = err instanceof Error ? err.message : String(err)
@@ -454,9 +485,14 @@ export const useSolanaStore = defineStore('solana', {
             : [...DEFAULT_LADDER_RULES]
         this.positionMeta = {}
         this.enteredPairs = []
+        this.enteredMints = []
         if (method === 'auto-snipe') this.autoSnipe = normalizeAutoSnipe(autoConfig)
 
         if (method === 'ladder' || method === 'snipe') {
+          // 執行直前に選択ペアの最新価格を取得してからエントリーする
+          // （スナイプはローリングプール由来で価格が古い場合があるため。
+          //   watchedPairs は設定済みのため refreshDisplayPrices が選択ペアを更新する）
+          await this.refreshDisplayPrices()
           // ラダー/スナイプ方式: 割当資金を等分して即時エントリーし、以後は出口ルールのみ実行
           const strategyName = method === 'snipe' ? '新規上場スナイプ' : 'ラダーロジック'
           const perToken = allocatedUsd / pairAddresses.length
@@ -562,6 +598,7 @@ export const useSolanaStore = defineStore('solana', {
         if (!this.watchedPairs.includes(addr)) delete this.positionMeta[addr]
       }
       if (this.enteredPairs.length > 200) this.enteredPairs = this.enteredPairs.slice(-200)
+      if (this.enteredMints.length > 200) this.enteredMints = this.enteredMints.slice(-200)
     },
     /**
      * 自動スナイプ（常時監視）の新規エントリー処理。
@@ -581,20 +618,27 @@ export const useSolanaStore = defineStore('solana', {
       if (slots === 0) return
       const perSlot = this.portfolio.initialUsd / this.autoSnipe.maxPositions
 
-      // 1) 監査通過・未エントリーの候補を空き枠の数だけ確定する
+      // 1) 監査通過・未エントリーの候補を空き枠の数だけ確定する。
+      //    ローリングプールにはフィード落ちした古い情報のエントリーも残るため、
+      //    **発見フィードで 5 分以内に確認できたエントリーのみ**を執行対象にする
+      //    （古い流動性・判定で監査を通過してエントリーする経路の遮断）
+      const now = Date.now()
       const candidates: SnipeScore[] = []
       for (const score of this.freshTokens) {
         if (candidates.length >= slots) break
-        if (!passesMinimalAudit(score, { allowCaution: this.autoSnipe.allowCaution })) continue
         const addr = score.token.pairAddress
+        if (now - (this.freshSeenAt[addr] ?? this.freshFetchedAt) > AUTO_SNIPE_MAX_DATA_AGE_MS) continue
+        if (!passesMinimalAudit(score, { allowCaution: this.autoSnipe.allowCaution })) continue
+        // 再エントリー防止はトークン（ミント）単位。代表プールの移り変わりでも二重エントリーしない
+        if (this.enteredMints.includes(score.token.baseAddress)) continue
         if (this.enteredPairs.includes(addr)) continue
         if (positionOf(this.portfolio, addr)) continue
         candidates.push(score)
       }
       if (candidates.length === 0) return
 
-      // 2) 執行直前に候補の価格を個別取得で最新化する（監視キャッシュは最大 2 分前のため）。
-      //    取得失敗時は監視価格で継続（鮮度は 5 分ガード内に有界。原則4: 劣化継続）
+      // 2) 執行直前に候補の価格を個別取得で最新化する（監視データは最大 2 分前のキャッシュのため）。
+      //    取得失敗時は監視価格で継続（候補は上の確認 5 分以内ゲートで鮮度が有界。原則4: 劣化継続）
       try {
         const addrs = candidates.map((s) => s.token.pairAddress).filter(isValidAddress)
         const data = await this._fetchDex<{ pairs?: DexPair[] }>(
@@ -634,6 +678,7 @@ export const useSolanaStore = defineStore('solana', {
           this.portfolio = result.portfolio
           this.positionMeta[addr] = { entryPriceUsd: score.token.priceUsd, triggered: [] }
           this.enteredPairs.push(addr)
+          this.enteredMints.push(score.token.baseAddress)
           if (!this.watchedPairs.includes(addr)) this.watchedPairs.push(addr)
         } catch (err) {
           // 資金不足等は記録して継続（原則4）

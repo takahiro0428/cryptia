@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   countDuplicates,
+  mergeFreshPool,
   passesMinimalAudit,
   scoreFreshToken,
   SNIPE_LADDER_RULES,
+  type FreshPoolEntry,
   type FreshTokenSignals,
 } from '~/shared/snipeScoring'
 import { checkLadder } from '~/shared/tradeEngine'
@@ -192,6 +194,88 @@ describe('snipeScoring: 自動スナイプの最低限監査', () => {
     )
     expect(score.verdict).toBe('candidate')
     expect(passesMinimalAudit(score)).toBe(true)
+  })
+})
+
+describe('snipeScoring: ローリング監視プール', () => {
+  const HOUR = 3_600_000
+  const t0 = 1_000_000_000_000
+
+  function entry(addr: string, ageHours: number, lastSeenAt: number, total = 80): FreshPoolEntry {
+    const score = scoreFreshToken(
+      token({ pairAddress: addr, baseAddress: `MINT${addr}`, ageHours }),
+      signals(),
+    )
+    return { score: { ...score, total }, lastSeenAt }
+  }
+
+  it('新規発見はプールへ追加され、既知トークンは最新情報へ置換される', () => {
+    const existing = [entry('PAIRold', 10, t0 - HOUR)]
+    const updated = scoreFreshToken(
+      token({ pairAddress: 'PAIRold', baseAddress: 'MINTPAIRold', ageHours: 11, priceUsd: 0.005 }),
+      signals(),
+    )
+    const fresh = scoreFreshToken(
+      token({ pairAddress: 'PAIRnew', baseAddress: 'MINTPAIRnew', ageHours: 1 }),
+      signals(),
+    )
+    const pool = mergeFreshPool(existing, [updated, fresh], t0)
+    expect(pool).toHaveLength(2)
+    const old = pool.find((e) => e.score.token.pairAddress === 'PAIRold')!
+    expect(old.score.token.priceUsd).toBe(0.005) // 最新情報へ置換
+    expect(old.lastSeenAt).toBe(t0)
+  })
+
+  it('フィードから外れても 48h 窓の間は監視を継続し、超過で失効する', () => {
+    // 最終確認時 40h → 未再確認のまま 6h 経過 = 実効 46h（継続）
+    const alive = entry('PAIRalive', 40, t0 - 6 * HOUR)
+    // 最終確認時 40h → 未再確認のまま 10h 経過 = 実効 50h（失効）
+    const expired = entry('PAIRexpired', 40, t0 - 10 * HOUR)
+    const pool = mergeFreshPool([alive, expired], [], t0)
+    expect(pool.map((e) => e.score.token.pairAddress)).toEqual(['PAIRalive'])
+  })
+
+  it('おすすめ順（判定 → スコア）で上限件数まで保持する', () => {
+    const entries = Array.from({ length: 60 }, (_, i) => entry(`PAIR${i}`, 5, t0, i))
+    const pool = mergeFreshPool(entries, [], t0, 48, 50)
+    expect(pool).toHaveLength(50)
+    // スコア降順（低スコアの 10 件が間引かれる）
+    expect(pool[0].score.total).toBe(59)
+    expect(pool[49].score.total).toBe(10)
+  })
+
+  it('重複排除はミント単位（代表プールが移り変わっても同一トークンは1枠）', () => {
+    const oldPool = scoreFreshToken(
+      token({ pairAddress: 'PAIRpumpfun', baseAddress: 'MINTsame', ageHours: 5, priceUsd: 0.001 }),
+      signals(),
+    )
+    const newPool = scoreFreshToken(
+      token({ pairAddress: 'PAIRraydium', baseAddress: 'MINTsame', ageHours: 6, priceUsd: 0.002 }),
+      signals(),
+    )
+    const pool = mergeFreshPool([{ score: oldPool, lastSeenAt: t0 - HOUR }], [newPool], t0)
+    expect(pool).toHaveLength(1)
+    expect(pool[0].score.token.pairAddress).toBe('PAIRraydium') // 最新の代表ペアを採用
+  })
+
+  it('プール満杯時も今サイクルの新規発見は優先残留する（新着の即追い出し防止）', () => {
+    // 高スコアの既存 50 件で満杯
+    const existing = Array.from({ length: 50 }, (_, i) => entry(`PAIRex${i}`, 5, t0 - HOUR, 90))
+    // 低スコア（caution 相当）の新規発見
+    const newcomerScore = scoreFreshToken(
+      token({ pairAddress: 'PAIRnewcomer', baseAddress: 'MINTnewcomer', ageHours: 0.5 }),
+      signals({
+        hasTwitter: false,
+        hasTelegram: false,
+        mintAuthorityRenounced: null,
+        freezeAuthorityAbsent: null,
+        buys24h: 10,
+        sells24h: 10,
+      }),
+    )
+    const pool = mergeFreshPool(existing, [newcomerScore], t0, 48, 50)
+    expect(pool).toHaveLength(50)
+    expect(pool.some((e) => e.score.token.pairAddress === 'PAIRnewcomer')).toBe(true)
   })
 })
 
