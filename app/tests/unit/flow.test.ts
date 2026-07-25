@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { estimateFlows, netFlowByAsset } from '~/shared/flow'
+import { buildFlowMatrix, estimateFlows, heuristicNetUsd, netFlowByAsset } from '~/shared/flow'
 import type { Ticker } from '~/shared/types'
 
 function ticker(assetId: string, change24hPct: number, volume24hUsd: number): Ticker {
@@ -57,6 +57,41 @@ describe('資金フロー推定（shared/flow）', () => {
       ticker(`asset-${i}`, i % 2 === 0 ? 5 : -5, 1e8 + i * 1e7),
     )
     expect(estimateFlows(many, '24h').length).toBeLessThanOrEqual(24)
+  })
+
+  it('buildFlowMatrix: 実測ネットフローを流出→流入へ比例配分する', () => {
+    const flows = buildFlowMatrix([
+      { assetId: 'btc', netUsd: -1000, measured: true },
+      { assetId: 'eth', netUsd: 600, measured: true },
+      { assetId: 'sol', netUsd: 400, measured: true },
+    ])
+    // 流出合計 1000 / 流入合計 1000 → moved = 1000 が 6:4 で配分される
+    const toEth = flows.find((f) => f.toAssetId === 'eth')
+    const toSol = flows.find((f) => f.toAssetId === 'sol')
+    expect(toEth?.amountUsd).toBeCloseTo(600)
+    expect(toSol?.amountUsd).toBeCloseTo(400)
+    expect(flows.every((f) => f.fromAssetId === 'btc')).toBe(true)
+  })
+
+  it('buildFlowMatrix: 流入・流出の少ない方まででフロー総量が制限される', () => {
+    const flows = buildFlowMatrix([
+      { assetId: 'a', netUsd: -10_000, measured: true },
+      { assetId: 'b', netUsd: 2_000, measured: true },
+    ])
+    const total = flows.reduce((s, f) => s + f.amountUsd, 0)
+    expect(total).toBeCloseTo(2_000)
+  })
+
+  it('buildFlowMatrix: 片方向のみ・空は空配列', () => {
+    expect(buildFlowMatrix([{ assetId: 'a', netUsd: 100, measured: true }])).toHaveLength(0)
+    expect(buildFlowMatrix([])).toHaveLength(0)
+  })
+
+  it('heuristicNetUsd: 騰落率の符号がネットフローの符号になる', () => {
+    const up = ticker('x', 10, 1e8)
+    const down = ticker('y', -10, 1e8)
+    expect(heuristicNetUsd(up, '24h')).toBeGreaterThan(0)
+    expect(heuristicNetUsd(down, '24h')).toBeLessThan(0)
   })
 
   it('netFlowByAsset: 流入・流出を銘柄別に集計する', () => {

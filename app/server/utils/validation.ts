@@ -59,6 +59,16 @@ export function validateTicker(value: unknown): Ticker {
   }
 }
 
+/** 戦略ライブラリ（RAG 検索対象）の検証。最大 10 件・各ドキュメントは個別検証 */
+export function validateStrategyLibrary(value: unknown): StrategyDoc[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) badRequest('library が不正です')
+  if (value.length > 10) badRequest('library は最大 10 件までです')
+  return value
+    .map((v) => validateStrategy(v))
+    .filter((d): d is StrategyDoc => d !== undefined)
+}
+
 /** 戦略ドキュメントの検証（プロンプト注入対策としてサイズ上限を設ける） */
 export function validateStrategy(value: unknown): StrategyDoc | undefined {
   if (value === undefined || value === null) return undefined

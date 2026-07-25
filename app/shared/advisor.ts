@@ -1,4 +1,4 @@
-import type { Horizon, Insight, Stance, StrategyDoc, Ticker, TradeDecision } from './types'
+import type { EntryRange, Horizon, Insight, Stance, StrategyDoc, Ticker, TradeDecision } from './types'
 import { clamp, momentum, rsi, volatility } from './ta'
 
 /**
@@ -80,6 +80,41 @@ function analyzeSignals(ticker: Ticker, horizon: Horizon): Signal {
   return { score: clamp(score, -100, 100), reasons, risks }
 }
 
+/**
+ * ロング/ショート別のおすすめエントリーレンジ算出。
+ * - ロング: 直近サポート（24 本安値）〜 現値からボラティリティ 1σ 押した水準（押し目買いゾーン）
+ * - ショート: 現値からボラティリティ 1σ 戻した水準 〜 直近レジスタンス（戻り売りゾーン）
+ * Gemini 応答が欠落・不正な場合のフォールバックとしても使用する。
+ */
+export function computeEntryRanges(ticker: Ticker): { long: EntryRange; short: EntryRange } {
+  const price = ticker.priceUsd
+  const spark = ticker.sparkline7d
+  const recent = spark.slice(-24)
+  const recentHigh = recent.length > 0 ? Math.max(...recent) : price
+  const recentLow = recent.length > 0 ? Math.min(...recent) : price
+  const vol = volatility(spark)
+  const nearPct = clamp(vol, 0.4, 3) // 現値からの最小乖離
+  const deepPct = clamp(vol * 3, 1.5, 8) // ゾーンの最大深さ
+
+  const longMax = price * (1 - nearPct / 100)
+  const longMin = Math.min(Math.max(recentLow, price * (1 - deepPct / 100)), longMax * 0.999)
+  const shortMin = price * (1 + nearPct / 100)
+  const shortMax = Math.max(Math.min(Math.max(recentHigh, shortMin), price * (1 + deepPct / 100)), shortMin * 1.001)
+
+  return {
+    long: {
+      minUsd: longMin,
+      maxUsd: longMax,
+      note: `押し目買いゾーン（直近サポート〜現値 -${nearPct.toFixed(1)}%）`,
+    },
+    short: {
+      minUsd: shortMin,
+      maxUsd: shortMax,
+      note: `戻り売りゾーン（現値 +${nearPct.toFixed(1)}%〜直近レジスタンス）`,
+    },
+  }
+}
+
 function toStance(score: number): Stance {
   if (score >= 15) return 'bullish'
   if (score <= -15) return 'bearish'
@@ -116,6 +151,7 @@ export function fallbackInsight(
     }`,
     reasons: sig.reasons,
     risks: sig.risks.length > 0 ? sig.risks : ['暗号資産は価格変動が大きく元本割れリスクがあります'],
+    entryRanges: computeEntryRanges(ticker),
     sources,
     engine: 'fallback',
     generatedAt: now,

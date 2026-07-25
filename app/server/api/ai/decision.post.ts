@@ -4,8 +4,14 @@ import { decideTrade } from '~/shared/advisor'
 import { clamp } from '~/shared/ta'
 import type { TradeDecision } from '~/shared/types'
 import { untrustedBlock } from '../../utils/prompt'
+import { retrieveRelevantStrategies } from '../../utils/rag'
 import { generateWithVertex, parseJsonResponse } from '../../utils/vertex'
-import { badRequest, validateStrategy, validateTicker } from '../../utils/validation'
+import {
+  badRequest,
+  validateStrategy,
+  validateStrategyLibrary,
+  validateTicker,
+} from '../../utils/validation'
 
 interface GeminiDecision {
   action?: string
@@ -24,6 +30,7 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
   const ticker = validateTicker(body?.ticker)
   const strategy = validateStrategy(body?.strategy)
   if (!strategy) badRequest('strategy は必須です')
+  const library = validateStrategyLibrary(body?.library)
 
   const exposureRatio = typeof body?.exposureRatio === 'number' ? clamp(body.exposureRatio, 0, 1) : 0
   const unrealizedPct =
@@ -31,6 +38,13 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
       ? clamp(body.unrealizedPct, -100, 100000)
       : null
   const asset = ASSET_MAP[ticker.assetId]
+
+  // ベクトル RAG: 関連ノウハウを検索して文脈注入（F-09 本格化）
+  const rag = await retrieveRelevantStrategies(
+    library,
+    `${asset?.nameJa ?? ''} ${asset?.symbol ?? ''} エントリー 損切り 利確 ${unrealizedPct !== null ? 'ポジション管理' : '新規建て'}`,
+    { excludeId: strategy!.id },
+  )
 
   const prompt = [
     'あなたはリスク管理を最優先するトレーディング AI です。次の1ティックの行動を決定してください。',
@@ -46,6 +60,15 @@ export default defineEventHandler(async (event): Promise<TradeDecision> => {
       `戦略名: ${strategy.name}\nリスク許容度: ${strategy.riskLevel}/5\n${strategy.content}`,
     ),
     '',
+    ...(rag.docs.length > 0
+      ? [
+          untrustedBlock(
+            '参考: 戦略ライブラリから検索された関連ノウハウ（補助的な判断材料）',
+            rag.docs.map((d) => `【${d.name}】\n${d.content}`).join('\n\n'),
+          ),
+          '',
+        ]
+      : []),
     '## ルール',
     '- sizeRatio は総資産に対する比率（buy 時）またはポジションに対する比率（sell 時）で 0〜0.3 の範囲',
     '- 戦略に反する行動をしてはならない。判断根拠に戦略名を含めること',

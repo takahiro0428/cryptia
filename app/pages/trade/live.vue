@@ -1,15 +1,27 @@
 <script setup lang="ts">
+import {
+  Bot,
+  Download,
+  ExternalLink,
+  RefreshCw,
+  ShieldCheck,
+  TriangleAlert,
+  Upload,
+  Wallet,
+  Zap,
+} from '@lucide/vue'
 import { ERROR_CODES, formatError } from '~/shared/errors'
-import { fmtTime, fmtUsd } from '~/shared/format'
+import { fmtQty, fmtTime, fmtUsd } from '~/shared/format'
 import { canEnableAutoTrade } from '~/shared/tradeGuard'
 import type { TradeDecision } from '~/shared/types'
+import { aiAuthHeaders } from '~/composables/useFirebase'
 import { useMarketStore } from '~/stores/market'
 import { useSolanaStore } from '~/stores/solana'
 import { useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
-import { useWalletStore, type JupiterQuote } from '~/stores/wallet'
+import { useWalletStore, LAMPORTS_PER_SOL, SOL_MINT, type JupiterQuote } from '~/stores/wallet'
 
-// 実トレード（UC-6 / F-07, F-08）
+// 実トレード（UC-6 / F-07, F-08）。買い（SOL→トークン）と売り（トークン→SOL）に対応
 const wallet = useWalletStore()
 const market = useMarketStore()
 const solana = useSolanaStore()
@@ -24,9 +36,13 @@ const KNOWN_TOKENS = [
   { symbol: 'WIF', name: 'dogwifhat', mint: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm' },
 ]
 
+const direction = ref<'buy' | 'sell'>('buy')
 const outMint = ref(KNOWN_TOKENS[0].mint)
 const outSymbol = ref(KNOWN_TOKENS[0].symbol)
 const amountSol = ref(0.1)
+/** 売り方向: 選択中の保有トークン mint と数量（トークン単位） */
+const sellMint = ref('')
+const sellAmount = ref(0)
 const quote = ref<JupiterQuote | null>(null)
 const quoting = ref(false)
 const showConfirm = ref(false)
@@ -34,12 +50,9 @@ const aiThinking = ref(false)
 const lastAiDecision = ref<TradeDecision | null>(null)
 
 const solPriceUsd = computed(() => market.tickerOf('solana')?.priceUsd ?? 0)
-const approxUsd = computed(() => amountSol.value * solPriceUsd.value)
 const guardReady = computed(() => canEnableAutoTrade(wallet.guard))
 
 // 価格の信頼性判定（AUDIT-1）: モック価格・鮮度切れの間は実トレードを全停止する。
-// モック/古い価格で上限ガードの USD 換算を行うと、実勢との乖離分だけ上限超過の
-// 実資金スワップが通過してしまうため。
 const PRICE_STALE_MS = 2 * 60 * 1000
 const nowTick = ref(Date.now())
 let nowTimer: ReturnType<typeof setInterval> | null = null
@@ -50,17 +63,61 @@ const priceReady = computed(
     nowTick.value - market.lastUpdatedAt < PRICE_STALE_MS,
 )
 
-// AI おすすめ（Solana スクリーナーの適格上位）。
-// モックデータ表示中は実在しないトークンを実資金画面に出さない（AUDIT-4 / ISSUE-4）
+// AI おすすめ（Solana スクリーナーの適格上位）。モック時は非表示（AUDIT-4）
 const aiPicks = computed(() => (solana.usingMockData ? [] : solana.recommended.slice(0, 4)))
+
+/** mint → 表示シンボルの解決（既知トークン → スクリーナー → 短縮 mint） */
+function symbolForMint(mint: string): string {
+  const known = KNOWN_TOKENS.find((t) => t.mint === mint)
+  if (known) return known.symbol
+  const screened = solana.tokens.find((t) => t.baseAddress === mint)
+  if (screened) return screened.baseSymbol
+  return `${mint.slice(0, 4)}…${mint.slice(-4)}`
+}
+
+const sellBalance = computed(() => wallet.tokenBalances.find((b) => b.mint === sellMint.value))
+/** 売却数量の raw 変換（decimals 対応・保有超過はクランプ） */
+const sellAmountRaw = computed(() => {
+  const bal = sellBalance.value
+  if (!bal || sellAmount.value <= 0) return '0'
+  const clamped = Math.min(sellAmount.value, bal.uiAmount)
+  const raw = BigInt(Math.floor(clamped * 10 ** bal.decimals))
+  const max = BigInt(bal.amountRaw)
+  return (raw > max ? max : raw).toString()
+})
+/** 見積りの受取 SOL（buy: 支払 SOL / sell: 受取見込み SOL） */
+const quoteSolAmount = computed(() => {
+  if (!quote.value) return 0
+  return direction.value === 'buy'
+    ? amountSol.value
+    : Number(quote.value.outAmount) / LAMPORTS_PER_SOL
+})
+/** 実際に売却される数量（quote の入力側から導出。クランプ後の実行値: ISSUE-P8-1） */
+const executedSellAmount = computed(() => {
+  if (!quote.value || !sellBalance.value) return 0
+  return Number(quote.value.inAmount) / 10 ** sellBalance.value.decimals
+})
+/** 売却トークンの参照 USD 価値（スクリーナー価格ベース。取れない場合 0） */
+const sellTokenRefUsd = computed(() => {
+  const token = solana.tokens.find((t) => t.baseAddress === sellMint.value)
+  if (!token || !sellBalance.value) return 0
+  return token.priceUsd * Math.min(sellAmount.value, sellBalance.value.uiAmount)
+})
+/**
+ * ガード判定・表示用の概算 USD。
+ * 売りは「受取 SOL 価値」と「売却トークンの参照価値」の大きい方を採用する
+ * （高スリッページ売却で日次上限への計上が過小になるのを防ぐ: AUDIT-P8-2）
+ */
+const approxUsd = computed(() =>
+  direction.value === 'buy'
+    ? amountSol.value * solPriceUsd.value
+    : Math.max(quoteSolAmount.value * solPriceUsd.value, sellTokenRefUsd.value),
+)
 
 function pickKnown(mint: string, symbol: string) {
   outMint.value = mint
   outSymbol.value = symbol
   quote.value = null
-}
-function pickRecommended(mint: string, symbol: string) {
-  pickKnown(mint, symbol)
 }
 
 function assertPriceReady(): boolean {
@@ -80,7 +137,17 @@ async function fetchQuote() {
   quoting.value = true
   quote.value = null
   try {
-    quote.value = await wallet.getQuote(outMint.value, amountSol.value)
+    if (direction.value === 'buy') {
+      quote.value = await wallet.getQuote(outMint.value, amountSol.value)
+    } else {
+      if (!sellBalance.value || sellAmountRaw.value === '0') {
+        ui.notify('売却するトークンと数量を指定してください', 'warn')
+        return
+      }
+      // 入力値を保有量にクランプして表示と実行値を一致させる（ISSUE-P8-1）
+      sellAmount.value = Math.min(sellAmount.value, sellBalance.value.uiAmount)
+      quote.value = await wallet.getQuoteRaw(sellMint.value, SOL_MINT, sellAmountRaw.value)
+    }
     showConfirm.value = true
   } catch (err) {
     const { code, message } = formatError(err)
@@ -96,11 +163,12 @@ async function confirmSwap() {
   showConfirm.value = false
   try {
     await wallet.executeSwap(quote.value, {
-      outSymbol: outSymbol.value,
-      amountSol: amountSol.value,
+      side: direction.value,
+      outSymbol: direction.value === 'buy' ? outSymbol.value : symbolForMint(sellMint.value),
+      amountSol: quoteSolAmount.value,
       approxUsd: approxUsd.value,
       auto: false,
-      reason: '手動注文',
+      reason: direction.value === 'buy' ? '手動買い注文' : '手動売り注文',
     })
   } catch {
     /* エラーはストア内で通知済み */
@@ -121,12 +189,20 @@ async function askAi() {
   try {
     const decision = await $fetch<TradeDecision>('/api/ai/degen-decision', {
       method: 'POST',
-      body: { token: pick.token, strategy: strategy.activeDoc, exposureRatio: 0, unrealizedPct: null },
+      body: {
+        token: pick.token,
+        strategy: strategy.activeDoc,
+        exposureRatio: 0,
+        unrealizedPct: null,
+        library: strategy.allDocs.slice(0, 10),
+      },
+      headers: await aiAuthHeaders(),
       timeout: 12_000,
     })
     lastAiDecision.value = decision
     if (decision.action === 'buy') {
-      pickRecommended(pick.token.baseAddress, pick.token.baseSymbol)
+      direction.value = 'buy'
+      pickKnown(pick.token.baseAddress, pick.token.baseSymbol)
       ui.notify(`AI 判断: ${pick.token.baseSymbol} を買い（見積りを確認して署名してください）`)
       await fetchQuote()
     } else {
@@ -142,7 +218,7 @@ async function askAi() {
 
 const explorerUrl = (txid: string) => `https://solscan.io/tx/${txid}`
 
-/** 取引履歴の JSON エクスポート（AUDIT-9: 匿名認証のデータ全損リスクへの自衛手段） */
+/** 取引履歴の JSON エクスポート（AUDIT-9） */
 function exportLog() {
   const blob = new Blob([wallet.exportLog()], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -178,24 +254,26 @@ useHead({ title: '実トレード | Cryptia' })
 <template>
   <div>
     <div class="card-title">
-      <h1>⚡ 実トレード</h1>
+      <h1><Zap :size="20" class="icon-inline" aria-hidden="true" />実トレード</h1>
       <span class="badge badge-warn">実資金</span>
     </div>
     <DisclaimerBanner :always="true" />
 
     <!-- 価格接続の異常時は実トレードを全停止する（AUDIT-1） -->
     <div v-if="!priceReady" class="disclaimer" role="alert">
-      ⚠️ 実勢価格を取得できないため、実トレード（見積り・発注・AI判断）を一時停止しています。
+      <TriangleAlert :size="14" class="icon-inline" aria-hidden="true" />
+      実勢価格を取得できないため、実トレード（見積り・発注・AI判断）を一時停止しています。
       価格接続の回復後に自動で再開します。
     </div>
     <div v-if="solana.usingMockData" class="disclaimer" role="alert">
-      ⚠️ DexScreener に接続できないため、AI おすすめトークンは表示されません（参考データを実資金取引に使用しないための保護です）。
+      <TriangleAlert :size="14" class="icon-inline" aria-hidden="true" />
+      DexScreener に接続できないため、AI おすすめトークンは表示されません（参考データを実資金取引に使用しないための保護です）。
     </div>
 
     <!-- ウォレット接続 -->
     <section class="card">
       <div class="card-title">
-        <h2>ウォレット</h2>
+        <h2><Wallet :size="17" class="icon-inline" aria-hidden="true" />ウォレット</h2>
         <span v-if="wallet.connected" class="badge badge-up">接続中</span>
       </div>
       <template v-if="!wallet.connected">
@@ -203,7 +281,9 @@ useHead({ title: '実トレード | Cryptia' })
           Phantom ウォレットを接続すると Jupiter アグリゲーター経由で実際のスワップを実行できます。
           秘密鍵がアプリに渡ることはなく、署名はウォレット内で完結します。
         </p>
-        <button class="btn btn-primary" type="button" @click="wallet.connect()">👛 Phantom を接続</button>
+        <button class="btn btn-primary" type="button" @click="wallet.connect()">
+          <Wallet :size="15" aria-hidden="true" /> Phantom を接続
+        </button>
         <p v-if="!wallet.hasPhantom" class="xs warn" style="margin-top: 8px">
           Phantom が検出されていません。拡張機能のインストール、またはスマホは Phantom アプリ内ブラウザでこのページを開いてください。
         </p>
@@ -217,7 +297,9 @@ useHead({ title: '実トレード | Cryptia' })
           <span v-if="wallet.solBalance !== null && solPriceUsd > 0" class="dim small">
             ≈ {{ fmtUsd(wallet.solBalance * solPriceUsd) }}
           </span>
-          <button class="btn btn-sm" type="button" @click="wallet.refreshBalance()">🔄</button>
+          <button class="btn btn-sm" type="button" aria-label="残高を更新" @click="wallet.refreshBalance()">
+            <RefreshCw :size="14" aria-hidden="true" />
+          </button>
           <button class="btn btn-sm btn-ghost" type="button" @click="wallet.disconnect()">切断</button>
         </div>
       </template>
@@ -226,7 +308,7 @@ useHead({ title: '実トレード | Cryptia' })
     <!-- 安全ガード（BR-2） -->
     <section class="card">
       <div class="card-title">
-        <h2>🛡 取引ガード</h2>
+        <h2><ShieldCheck :size="17" class="icon-inline" aria-hidden="true" />取引ガード</h2>
         <span class="badge" :class="guardReady ? 'badge-up' : 'badge-warn'">
           {{ guardReady ? '設定済み' : '未設定' }}
         </span>
@@ -275,52 +357,90 @@ useHead({ title: '実トレード | Cryptia' })
 
     <!-- 注文パネル -->
     <section class="card">
-      <h2>スワップ注文（SOL → トークン）</h2>
-
-      <div class="field">
-        <span class="small dim">🤖 AI のおすすめ（スクリーニング適格上位）</span>
-        <div class="chips">
-          <button
-            v-for="s in aiPicks"
-            :key="s.token.pairAddress"
-            class="chip"
-            :class="{ on: outMint === s.token.baseAddress }"
-            type="button"
-            @click="pickRecommended(s.token.baseAddress, s.token.baseSymbol)"
-          >
-            {{ s.token.baseSymbol }} <span class="xs faint">{{ s.total }}</span>
-          </button>
-          <span v-if="aiPicks.length === 0" class="xs faint">適格トークンの取得待ち…</span>
-        </div>
+      <h2>スワップ注文</h2>
+      <div class="tabs" style="max-width: 320px; margin-bottom: 12px" role="tablist">
+        <button class="tab" :class="{ active: direction === 'buy' }" role="tab" :aria-selected="direction === 'buy'" type="button" @click="direction = 'buy'; quote = null">
+          買う（SOL → トークン）
+        </button>
+        <button class="tab" :class="{ active: direction === 'sell' }" role="tab" :aria-selected="direction === 'sell'" type="button" @click="direction = 'sell'; quote = null">
+          売る（トークン → SOL）
+        </button>
       </div>
 
-      <div class="field">
-        <span class="small dim">主要トークンから選ぶ</span>
-        <div class="chips">
-          <button
-            v-for="t in KNOWN_TOKENS"
-            :key="t.mint"
-            class="chip"
-            :class="{ on: outMint === t.mint }"
-            type="button"
-            @click="pickKnown(t.mint, t.symbol)"
-          >
-            {{ t.symbol }}
-          </button>
+      <!-- 買い方向 -->
+      <template v-if="direction === 'buy'">
+        <div class="field">
+          <span class="small dim"><Bot :size="13" class="icon-inline" aria-hidden="true" />AI のおすすめ（スクリーニング適格上位）</span>
+          <div class="chips">
+            <button
+              v-for="s in aiPicks"
+              :key="s.token.pairAddress"
+              class="chip"
+              :class="{ on: outMint === s.token.baseAddress }"
+              type="button"
+              @click="pickKnown(s.token.baseAddress, s.token.baseSymbol)"
+            >
+              {{ s.token.baseSymbol }} <span class="xs faint">{{ s.total }}</span>
+            </button>
+            <span v-if="aiPicks.length === 0" class="xs faint">適格トークンの取得待ち…</span>
+          </div>
         </div>
-      </div>
 
-      <label class="field">
-        <span>支払い数量（SOL）</span>
-        <input v-model.number="amountSol" type="number" class="input" min="0.001" step="0.01" inputmode="decimal" />
-        <span class="xs dim">≈ {{ fmtUsd(approxUsd) }}</span>
-      </label>
+        <div class="field">
+          <span class="small dim">主要トークンから選ぶ</span>
+          <div class="chips">
+            <button
+              v-for="t in KNOWN_TOKENS"
+              :key="t.mint"
+              class="chip"
+              :class="{ on: outMint === t.mint }"
+              type="button"
+              @click="pickKnown(t.mint, t.symbol)"
+            >
+              {{ t.symbol }}
+            </button>
+          </div>
+        </div>
+
+        <label class="field">
+          <span>支払い数量（SOL）</span>
+          <input v-model.number="amountSol" type="number" class="input" min="0.001" step="0.01" inputmode="decimal" />
+          <span class="xs dim">≈ {{ fmtUsd(amountSol * solPriceUsd) }}</span>
+        </label>
+      </template>
+
+      <!-- 売り方向 -->
+      <template v-else>
+        <div class="field">
+          <span class="small dim">売却するトークン（ウォレット内の保有）</span>
+          <div class="chips">
+            <button
+              v-for="b in wallet.tokenBalances.slice(0, 12)"
+              :key="b.mint"
+              class="chip"
+              :class="{ on: sellMint === b.mint }"
+              type="button"
+              @click="sellMint = b.mint; sellAmount = 0; quote = null"
+            >
+              {{ symbolForMint(b.mint) }} <span class="xs faint">{{ fmtQty(b.uiAmount) }}</span>
+            </button>
+            <span v-if="wallet.tokenBalances.length === 0" class="xs faint">
+              保有トークンがありません（接続後に自動取得されます）
+            </span>
+          </div>
+        </div>
+        <label v-if="sellBalance" class="field">
+          <span>売却数量（保有: {{ fmtQty(sellBalance.uiAmount) }}）</span>
+          <input v-model.number="sellAmount" type="number" class="input" min="0" :max="sellBalance.uiAmount" step="any" inputmode="decimal" />
+          <button class="btn btn-sm btn-ghost" type="button" @click="sellAmount = sellBalance.uiAmount">全量</button>
+        </label>
+      </template>
 
       <div style="display: flex; gap: 8px; flex-wrap: wrap">
         <button
           class="btn btn-primary"
           type="button"
-          :disabled="!wallet.connected || quoting || amountSol <= 0 || !priceReady"
+          :disabled="!wallet.connected || quoting || !priceReady || (direction === 'buy' ? amountSol <= 0 : sellAmountRaw === '0')"
           @click="fetchQuote"
         >
           {{ quoting ? '見積り取得中…' : '見積りを取得' }}
@@ -331,15 +451,15 @@ useHead({ title: '実トレード | Cryptia' })
           :disabled="!wallet.connected || aiThinking || !priceReady"
           @click="askAi"
         >
-          {{ aiThinking ? 'AI 分析中…' : '🤖 AI に判断させる' }}
+          <Bot :size="15" aria-hidden="true" />
+          {{ aiThinking ? 'AI 分析中…' : 'AI に判断させる' }}
         </button>
       </div>
       <p v-if="lastAiDecision" class="small dim" style="margin-top: 8px">
         直近の AI 判断: <b>{{ lastAiDecision.action }}</b>（確信度 {{ lastAiDecision.confidence }}%）— {{ lastAiDecision.reason }}
       </p>
       <p class="xs faint" style="margin-top: 8px">
-        ※ 現バージョンの発注は SOL → トークンの買い方向のみ対応。売却はウォレットまたは Jupiter から行えます。
-        AI 自動実トレードもすべての注文でウォレット署名の確認が入ります。
+        AI 自動実トレードを含むすべての注文でウォレット署名の確認が入ります。
       </p>
     </section>
 
@@ -349,8 +469,28 @@ useHead({ title: '実トレード | Cryptia' })
         <h2>注文内容の確認</h2>
         <table class="data">
           <tbody>
-            <tr><td class="dim">支払い</td><td class="mono">{{ amountSol }} SOL（≈ {{ fmtUsd(approxUsd) }}）</td></tr>
-            <tr><td class="dim">受け取り</td><td class="mono">{{ outSymbol }}（見積り {{ quote.outAmount }} raw）</td></tr>
+            <tr v-if="direction === 'buy'">
+              <td class="dim">支払い</td>
+              <td class="mono">{{ amountSol }} SOL（≈ {{ fmtUsd(approxUsd) }}）</td>
+            </tr>
+            <tr v-else>
+              <td class="dim">売却</td>
+              <!-- 表示は入力値ではなく quote 由来の実行数量（ISSUE-P8-1） -->
+              <td class="mono">{{ fmtQty(executedSellAmount) }} {{ symbolForMint(sellMint) }}</td>
+            </tr>
+            <tr v-if="direction === 'buy'">
+              <td class="dim">受け取り</td>
+              <td class="mono">{{ outSymbol }}（見積り {{ quote.outAmount }} raw）</td>
+            </tr>
+            <tr v-else>
+              <td class="dim">受け取り</td>
+              <!-- 受取価値は実際の quote 由来を表示（max() 後のガード計上額と混同しない: ISSUE-P8-12） -->
+              <td class="mono">{{ quoteSolAmount.toFixed(6) }} SOL（≈ {{ fmtUsd(quoteSolAmount * solPriceUsd) }}）</td>
+            </tr>
+            <tr v-if="direction === 'sell' && approxUsd > quoteSolAmount * solPriceUsd * 1.05">
+              <td class="dim">上限への計上額</td>
+              <td class="mono">{{ fmtUsd(approxUsd) }} <span class="xs faint">（トークン参照価値・保守値）</span></td>
+            </tr>
             <tr><td class="dim">価格影響</td><td class="mono" :class="Number(quote.priceImpactPct) > 1 ? 'down' : ''">{{ Number(quote.priceImpactPct).toFixed(3) }}%</td></tr>
             <tr><td class="dim">スリッページ許容</td><td class="mono">1.0%</td></tr>
           </tbody>
@@ -371,27 +511,34 @@ useHead({ title: '実トレード | Cryptia' })
         <h2>実トレード履歴</h2>
         <div style="display: flex; gap: 6px; align-items: center">
           <span class="xs faint">{{ wallet.tradeLog.length }} 件</span>
-          <button class="btn btn-sm btn-ghost" type="button" :disabled="wallet.tradeLog.length === 0" @click="exportLog">
-            ⬇ 保存
+          <button class="btn btn-sm btn-ghost" type="button" :disabled="wallet.tradeLog.length === 0" aria-label="履歴を保存" @click="exportLog">
+            <Download :size="14" aria-hidden="true" /> 保存
           </button>
-          <button class="btn btn-sm btn-ghost" type="button" @click="importInput?.click()">⬆ 復元</button>
+          <button class="btn btn-sm btn-ghost" type="button" aria-label="履歴を復元" @click="importInput?.click()">
+            <Upload :size="14" aria-hidden="true" /> 復元
+          </button>
           <input ref="importInput" type="file" accept="application/json" hidden @change="importLog" />
         </div>
       </div>
       <p class="xs faint">
-        履歴は匿名 ID に紐づくため、ブラウザのサイトデータ消去や端末変更で参照できなくなります。
-        「⬇ 保存」で定期的にバックアップしてください（オンチェーンの原本は Solscan で確認できます）。
+        履歴のバックアップを推奨します（オンチェーンの原本は Solscan で確認できます）。
+        アカウント連携済みなら端末を変えてもデータは引き継がれます。
       </p>
       <p v-if="wallet.tradeLog.length === 0" class="dim small">まだ実トレードはありません</p>
       <div v-for="t in wallet.tradeLog.slice(0, 30)" :key="t.txid" class="log-row small">
         <span class="xs faint nowrap">{{ fmtTime(t.at) }}</span>
-        <span class="badge badge-up">買</span>
+        <span class="badge" :class="t.side === 'buy' ? 'badge-up' : 'badge-down'">{{ t.side === 'buy' ? '買' : '売' }}</span>
         <span class="bold">{{ t.outSymbol }}</span>
-        <span class="mono">{{ t.inAmountSol }} SOL</span>
+        <span class="mono">{{ t.inAmountSol.toFixed(4) }} SOL</span>
         <span v-if="t.auto" class="badge badge-accent">AI自動</span>
-        <a :href="explorerUrl(t.txid)" target="_blank" rel="noopener noreferrer" class="xs">Solscan ↗</a>
+        <a :href="explorerUrl(t.txid)" target="_blank" rel="noopener noreferrer" class="xs" style="display: inline-flex; align-items: center; gap: 2px">
+          Solscan <ExternalLink :size="11" aria-hidden="true" />
+        </a>
       </div>
     </section>
+
+    <!-- アカウント連携（AUDIT-9 本対応） -->
+    <AccountLink />
   </div>
 </template>
 

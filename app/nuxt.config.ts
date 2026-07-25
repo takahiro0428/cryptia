@@ -7,6 +7,8 @@ export default defineNuxtConfig({
   modules: ['@pinia/nuxt', '@vite-pwa/nuxt'],
   css: ['~/assets/css/main.css'],
   app: {
+    // ページ遷移の軽いフェード（操作の連続性。reduced-motion 環境では CSS 側で無効化）
+    pageTransition: { name: 'page', mode: 'out-in' },
     head: {
       title: 'Cryptia — AI Trade Assistant',
       meta: [

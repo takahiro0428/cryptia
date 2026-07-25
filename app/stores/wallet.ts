@@ -14,6 +14,17 @@ const JUPITER_SWAP_URL = 'https://quote-api.jup.ag/v6/swap'
 /** SOL（wrapped）ミントアドレス。Jupiter スワップの入力側として使用 */
 export const SOL_MINT = 'So11111111111111111111111111111111111111112'
 export const LAMPORTS_PER_SOL = 1_000_000_000
+/** SPL Token プログラム（残高取得用）。新興トークンには Token-2022 も実在する */
+const TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+
+/** ウォレット内の SPL トークン残高 */
+export interface TokenBalance {
+  mint: string
+  amountRaw: string
+  decimals: number
+  uiAmount: number
+}
 
 export interface LiveTradeRecord {
   at: number
@@ -87,6 +98,8 @@ export const useWalletStore = defineStore('wallet', {
     connected: false,
     publicKey: '' as string,
     solBalance: null as number | null,
+    /** SPL トークン残高（売り方向スワップの入力候補） */
+    tokenBalances: [] as TokenBalance[],
     guard: { ...DEFAULT_GUARD } as TradeGuardConfig,
     tradeLog: [] as LiveTradeRecord[],
     busy: false,
@@ -144,6 +157,8 @@ export const useWalletStore = defineStore('wallet', {
         this.connected = false
         this.publicKey = ''
         this.solBalance = null
+        // 前ウォレットの残高が売りタブに残らないようクリア（ISSUE-P8-7）
+        this.tokenBalances = []
       }
     },
     async refreshBalance() {
@@ -166,6 +181,75 @@ export const useWalletStore = defineStore('wallet', {
       } catch {
         /* 残高取得失敗は表示のみの問題。取引時に再検証される（原則4） */
       }
+      void this.fetchTokenBalances()
+    },
+    /**
+     * SPL トークン残高の取得（売り方向スワップ用: Phase 8 本格化）。
+     * SPL Token と Token-2022 の両プログラムを対象にする（ISSUE-P8-2:
+     * 新興トークンには Token-2022 ミントが実在し、片方だけだと売却不能になる）。
+     */
+    async fetchTokenBalances() {
+      if (!this.publicKey) return
+      type RpcTokenAccounts = {
+        result?: {
+          value?: {
+            account?: {
+              data?: {
+                parsed?: {
+                  info?: {
+                    mint?: string
+                    tokenAmount?: { amount?: string; decimals?: number; uiAmount?: number }
+                  }
+                }
+              }
+            }
+          }[]
+        }
+      }
+      const queryProgram = async (programId: string): Promise<RpcTokenAccounts> => {
+        const res = await fetch(SOLANA_RPC, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'getTokenAccountsByOwner',
+            params: [this.publicKey, { programId }, { encoding: 'jsonParsed' }],
+          }),
+        })
+        return (await res.json()) as RpcTokenAccounts
+      }
+      try {
+        const results = await Promise.allSettled([
+          queryProgram(TOKEN_PROGRAM_ID),
+          queryProgram(TOKEN_2022_PROGRAM_ID),
+        ])
+        // 全プログラムのクエリが失敗した場合は前回の残高を保持する
+        // （一時的な RPC 障害で売りタブが空に巻き戻るのを防ぐ: ISSUE-P8-15 / 原則2）
+        if (results.every((r) => r.status === 'rejected')) return
+        const balances = new Map<string, TokenBalance>()
+        for (const r of results) {
+          if (r.status !== 'fulfilled') continue
+          for (const entry of r.value.result?.value ?? []) {
+            const info = entry.account?.data?.parsed?.info
+            const amount = info?.tokenAmount
+            if (!info?.mint || !amount?.amount || typeof amount.decimals !== 'number') continue
+            const uiAmount = amount.uiAmount ?? 0
+            if (uiAmount <= 0) continue
+            // 同一ミントの複数トークンアカウントは合算する
+            const prev = balances.get(info.mint)
+            balances.set(info.mint, {
+              mint: info.mint,
+              amountRaw: prev ? String(BigInt(prev.amountRaw) + BigInt(amount.amount)) : amount.amount,
+              decimals: amount.decimals,
+              uiAmount: (prev?.uiAmount ?? 0) + uiAmount,
+            })
+          }
+        }
+        this.tokenBalances = [...balances.values()].sort((a, b) => b.uiAmount - a.uiAmount)
+      } catch {
+        /* 表示のみの問題。次回 refresh で再試行（原則4） */
+      }
     },
     setGuard(patch: Partial<TradeGuardConfig>) {
       this.guard = { ...this.guard, ...patch }
@@ -176,14 +260,18 @@ export const useWalletStore = defineStore('wallet', {
     consentRisk() {
       this.setGuard({ riskConsentAt: Date.now() })
     },
-    /** Jupiter スワップ見積り取得 */
-    async getQuote(outputMint: string, amountSol: number, slippageBps = 100): Promise<JupiterQuote> {
-      const amountLamports = Math.round(amountSol * LAMPORTS_PER_SOL)
-      if (amountLamports <= 0) {
+    /** Jupiter スワップ見積り（raw 数量指定・双方向対応） */
+    async getQuoteRaw(
+      inputMint: string,
+      outputMint: string,
+      amountRaw: string,
+      slippageBps = 100,
+    ): Promise<JupiterQuote> {
+      if (!/^[1-9][0-9]*$/.test(amountRaw)) {
         throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '取引数量が不正です')
       }
       try {
-        const url = `${JUPITER_QUOTE_URL}?inputMint=${SOL_MINT}&outputMint=${outputMint}&amount=${amountLamports}&slippageBps=${slippageBps}`
+        const url = `${JUPITER_QUOTE_URL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippageBps}`
         const res = await fetch(url)
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const quote = (await res.json()) as JupiterQuote & { error?: string }
@@ -198,13 +286,30 @@ export const useWalletStore = defineStore('wallet', {
         )
       }
     },
+    /** Jupiter スワップ見積り（買い方向: SOL → トークン） */
+    async getQuote(outputMint: string, amountSol: number, slippageBps = 100): Promise<JupiterQuote> {
+      const amountLamports = Math.round(amountSol * LAMPORTS_PER_SOL)
+      if (amountLamports <= 0) {
+        throw new CryptiaError(ERROR_CODES.INVALID_INPUT, '取引数量が不正です')
+      }
+      return this.getQuoteRaw(SOL_MINT, outputMint, String(amountLamports), slippageBps)
+    },
     /**
-     * スワップ実行（署名は Phantom 内）。
-     * @param approxUsd ガード判定用の概算 USD（SOL 価格 × 数量）
+     * スワップ実行（署名は Phantom 内・買い/売り両方向対応）。
+     * @param meta.side buy = SOL→トークン / sell = トークン→SOL
+     * @param meta.amountSol SOL 数量（買い=支払額 / 売り=受取見込み額）
+     * @param meta.approxUsd ガード判定用の概算 USD（SOL 価格換算）
      */
     async executeSwap(
       quote: JupiterQuote,
-      meta: { outSymbol: string; amountSol: number; approxUsd: number; auto: boolean; reason: string },
+      meta: {
+        side: 'buy' | 'sell'
+        outSymbol: string
+        amountSol: number
+        approxUsd: number
+        auto: boolean
+        reason: string
+      },
     ): Promise<string> {
       const ui = useUiStore()
       const phantom = getPhantom()
@@ -254,7 +359,7 @@ export const useWalletStore = defineStore('wallet', {
         this.tradeLog = [
           {
             at: Date.now(),
-            side: 'buy',
+            side: meta.side,
             inputMint: quote.inputMint,
             outputMint: quote.outputMint,
             inAmountSol: meta.amountSol,

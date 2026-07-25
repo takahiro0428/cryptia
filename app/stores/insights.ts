@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { fallbackInsight } from '~/shared/advisor'
 import type { Horizon, Insight, NewsItem, Ticker } from '~/shared/types'
+import { aiAuthHeaders } from '~/composables/useFirebase'
 import { useStrategyStore } from '~/stores/strategy'
 
 /** インサイトのキャッシュ有効期間（同一銘柄×時間軸の再生成を抑制） */
@@ -31,11 +32,14 @@ export const useInsightsStore = defineStore('insights', {
       if (this.loadingKeys.includes(key)) return cached ?? fallbackInsight(ticker, horizon)
 
       this.loadingKeys.push(key)
-      const strategy = useStrategyStore().activeDoc
+      const strategyStore = useStrategyStore()
+      const strategy = strategyStore.activeDoc
       try {
         const insight = await $fetch<Insight>('/api/ai/insight', {
           method: 'POST',
-          body: { ticker, horizon, strategy },
+          // library = RAG 検索対象の戦略ライブラリ / headers = 認証済み優遇レートリミット
+          body: { ticker, horizon, strategy, library: strategyStore.allDocs.slice(0, 10) },
+          headers: await aiAuthHeaders(),
           timeout: 15_000,
         })
         this.cache[key] = insight

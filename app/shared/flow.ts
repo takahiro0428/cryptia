@@ -1,6 +1,55 @@
 import type { FundFlow, FlowPeriod, Ticker } from './types'
 import { clamp } from './ta'
 
+/** 銘柄別の資金流入出（実測 or 推定）。measured=true は Binance テイカーフロー実測値 */
+export interface FlowEntry {
+  assetId: string
+  /** ネット流入額 USD（正=流入 / 負=流出） */
+  netUsd: number
+  measured: boolean
+}
+
+/**
+ * 銘柄別ネットフローから銘柄間フロー行列を構築する。
+ * 流出銘柄→流入銘柄へ、双方のシェアに比例して配分する（実測値ベース）。
+ * 銘柄間の個別経路は公開データが存在しないため比例配分である旨は UI に明示する。
+ */
+export function buildFlowMatrix(entries: FlowEntry[]): FundFlow[] {
+  const inflows = entries.filter((e) => e.netUsd > 0)
+  const outflows = entries.filter((e) => e.netUsd < 0)
+  if (inflows.length === 0 || outflows.length === 0) return []
+
+  const totalIn = inflows.reduce((s, e) => s + e.netUsd, 0)
+  const totalOut = outflows.reduce((s, e) => s - e.netUsd, 0)
+  // 対で移動したとみなせるのは流入・流出の小さい方まで
+  const movedUsd = Math.min(totalIn, totalOut)
+  if (movedUsd <= 0) return []
+
+  const flows: FundFlow[] = []
+  for (const out of outflows) {
+    const outShare = -out.netUsd / totalOut
+    for (const inn of inflows) {
+      const inShare = inn.netUsd / totalIn
+      const amountUsd = movedUsd * outShare * inShare
+      if (amountUsd <= 0) continue
+      flows.push({ fromAssetId: out.assetId, toAssetId: inn.assetId, amountUsd })
+    }
+  }
+  return flows.sort((a, b) => b.amountUsd - a.amountUsd).slice(0, 24)
+}
+
+/**
+ * Binance 未上場銘柄（株式トークン等）のネットフロー推定値。
+ * 実測エントリと同一スケールになるよう「期間騰落率 × 期間出来高の半分」で近似する。
+ */
+export function heuristicNetUsd(ticker: Ticker, period: FlowPeriod): number {
+  const changePct =
+    period === '1h' ? ticker.change1hPct : period === '24h' ? ticker.change24hPct : ticker.change7dPct
+  const periodVolume =
+    period === '1h' ? ticker.volume24hUsd / 24 : period === '24h' ? ticker.volume24hUsd : ticker.volume24hUsd * 7
+  return periodVolume * clamp(changePct / 100, -0.5, 0.5) * 0.5
+}
+
 /**
  * 銘柄間の資金フロー推定。
  *

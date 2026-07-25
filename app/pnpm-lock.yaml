@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@lucide/vue':
+        specifier: ^1.26.0
+        version: 1.26.0(vue@3.5.40(typescript@7.0.2))
       '@pinia/nuxt':
         specifier: ^0.11.0
         version: 0.11.3(magic-string@0.30.21)(magicast@0.5.3)(oxc-parser@0.140.0)(pinia@3.0.4(typescript@7.0.2)(vue@3.5.40(typescript@7.0.2)))(unplugin@3.3.0(esbuild@0.28.1)(rollup@4.62.2)(vite@7.3.6(@types/node@26.1.1)(jiti@2.7.0)(terser@5.49.0)(yaml@2.9.0)))
@@ -26,6 +29,9 @@ importers:
       google-auth-library:
         specifier: ^10.1.0
         version: 10.9.1
+      jose:
+        specifier: ^6.2.4
+        version: 6.2.4
       nuxt:
         specifier: ^3.19.0
         version: 3.21.9(@types/node@26.1.1)(@vue/compiler-sfc@3.5.40)(bufferutil@4.1.0)(cac@6.7.14)(commander@14.0.3)(db0@0.3.4)(esbuild@0.28.1)(ioredis@5.11.1)(magicast@0.5.3)(rollup-plugin-visualizer@7.0.1(rollup@4.62.2))(rollup@4.62.2)(srvx@0.11.22)(terser@5.49.0)(typescript@7.0.2)(utf-8-validate@6.0.6)(vite@7.3.6(@types/node@26.1.1)(jiti@2.7.0)(terser@5.49.0)(yaml@2.9.0))(yaml@2.9.0)
@@ -1099,6 +1105,11 @@ packages:
 
   '@kwsites/promise-deferred@1.1.1':
     resolution: {integrity: sha512-GaHYm+c0O9MjZRu0ongGBRbinu8gVAMd2UZjji6jVmqKtZluZnptXGWhz1E8j8D2HJ3f/yMxKAUC0b+57wncIw==}
+
+  '@lucide/vue@1.26.0':
+    resolution: {integrity: sha512-jz00zLm8+i7VzBuQTbmjChIvIKehaIK5YbOVC+bab7qTh4JTkCd0XJQ4l5TY57gT08fMPVlvUITROB/vm/xImA==}
+    peerDependencies:
+      vue: '>=3.0.1'
 
   '@mapbox/node-pre-gyp@2.0.3':
     resolution: {integrity: sha512-uwPAhccfFJlsfCxMYTwOdVfOz3xqyj8xYL3zJj8f0pb30tLohnnFPhLuqp4/qoEz8sNxe4SESZedcBojRefIzg==}
@@ -7053,6 +7064,10 @@ snapshots:
       - supports-color
 
   '@kwsites/promise-deferred@1.1.1': {}
+
+  '@lucide/vue@1.26.0(vue@3.5.40(typescript@7.0.2))':
+    dependencies:
+      vue: 3.5.40(typescript@7.0.2)
 
   '@mapbox/node-pre-gyp@2.0.3':
     dependencies:

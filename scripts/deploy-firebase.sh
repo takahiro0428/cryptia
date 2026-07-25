@@ -74,6 +74,8 @@ echo "▶ Functions ランタイム設定を生成"
   # レートリミットの信頼プロキシホップ数（既定 1。Hosting CDN 経由で XFF に
   # ホップが加わる構成では 2 を設定。server/middleware/ai-rate-limit.ts 参照）
   [ -n "${NUXT_TRUSTED_PROXY_HOPS:-}" ] && echo "NUXT_TRUSTED_PROXY_HOPS=$NUXT_TRUSTED_PROXY_HOPS"
+  # 'true' で AI API を認証必須化（未認証 401。既定は匿名許可 + 低レート枠）
+  [ -n "${NUXT_AI_REQUIRE_AUTH:-}" ] && echo "NUXT_AI_REQUIRE_AUTH=$NUXT_AI_REQUIRE_AUTH"
 } > app/.output/server/.env
 
 # --- デプロイ ---

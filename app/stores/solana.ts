@@ -22,6 +22,7 @@ import type {
   TokenScore,
   TradeDecision,
 } from '~/shared/types'
+import { aiAuthHeaders } from '~/composables/useFirebase'
 import { persist, restore } from '~/composables/usePersistence'
 import { useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
@@ -355,7 +356,14 @@ export const useSolanaStore = defineStore('solana', {
             try {
               decision = await $fetch<TradeDecision>('/api/ai/degen-decision', {
                 method: 'POST',
-                body: { token, strategy, exposureRatio, unrealizedPct },
+                body: {
+                  token,
+                  strategy,
+                  exposureRatio,
+                  unrealizedPct,
+                  library: useStrategyStore().allDocs.slice(0, 10),
+                },
+                headers: await aiAuthHeaders(),
                 timeout: 12_000,
               })
             } catch {

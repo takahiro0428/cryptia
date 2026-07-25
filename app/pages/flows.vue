@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ArrowDownLeft, ArrowUpRight } from '@lucide/vue'
 import { ASSET_MAP } from '~/shared/assets'
 import { netFlowByAsset } from '~/shared/flow'
 import { fmtUsd } from '~/shared/format'
@@ -12,6 +13,18 @@ const selectedId = ref<string | null>(null)
 
 const flows = computed(() => market.flowsFor(period.value))
 const netFlows = computed(() => netFlowByAsset(flows.value))
+const isMeasured = computed(() => market.flowSource(period.value) === 'measured-hybrid')
+
+// 実測ネットフロー（Binance テイカーフロー）を期間切替時に取得
+watch(period, (p) => void market.fetchNetFlows(p), { immediate: true })
+
+// バブル選択時、内訳パネルを視界に入るまで追従スクロール（マップ下にあり気付けないため）
+const detailRef = ref<HTMLElement | null>(null)
+watch(selectedId, async (id) => {
+  if (!id) return
+  await nextTick()
+  detailRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+})
 
 const selectedAsset = computed(() => (selectedId.value ? ASSET_MAP[selectedId.value] : undefined))
 const selectedNet = computed(() =>
@@ -45,10 +58,18 @@ useHead({ title: '資金フロー | Cryptia' })
   <div>
     <div class="card-title">
       <h1>資金フローマップ</h1>
-      <span class="badge badge-accent">推定値</span>
+      <span class="badge" :class="isMeasured ? 'badge-up' : 'badge-accent'">
+        {{ isMeasured ? '実測ベース' : '推定値' }}
+      </span>
     </div>
     <p class="small dim">
-      バブルの大きさ = 時価総額、矢印の太さ = 推定資金フロー量。出来高と騰落率から推定した参考値です。
+      バブルの大きさ = 時価総額、矢印の太さ = 資金フロー量。バブルはドラッグで動かせます。
+      <template v-if="isMeasured">
+        フロー量は Binance のテイカー買い/売り出来高から実測した銘柄別の資金流入出です（未上場銘柄は推定補完・銘柄間の経路配分は比例配分）。
+      </template>
+      <template v-else>
+        出来高と騰落率から推定した参考値です（実測データ取得中または未取得）。
+      </template>
     </p>
 
     <div class="tabs" role="tablist" style="margin-bottom: 12px; max-width: 320px">
@@ -73,8 +94,8 @@ useHead({ title: '資金フロー | Cryptia' })
       @select="(id) => (selectedId = id)"
     />
 
-    <!-- 選択バブルの内訳（UC-2: タップで流入・流出の内訳） -->
-    <section v-if="selectedAsset" class="card" style="margin-top: 12px">
+    <!-- 選択バブルの内訳（UC-2: タップで流入・流出の内訳。閉じるのはボタンのみ） -->
+    <section v-if="selectedAsset" ref="detailRef" class="card" style="margin-top: 12px">
       <div class="card-title">
         <h2>
           <span :style="{ color: selectedAsset.color }">{{ selectedAsset.symbol }}</span>
@@ -91,8 +112,10 @@ useHead({ title: '資金フロー | Cryptia' })
       </div>
       <ul class="flow-list">
         <li v-for="(d, i) in selectedFlowDetails" :key="i">
-          <span :class="d.direction === 'in' ? 'up' : 'down'">
-            {{ d.direction === 'in' ? '◀ 流入' : '▶ 流出' }}
+          <span :class="d.direction === 'in' ? 'up' : 'down'" style="display: inline-flex; align-items: center; gap: 3px">
+            <ArrowDownLeft v-if="d.direction === 'in'" :size="14" aria-hidden="true" />
+            <ArrowUpRight v-else :size="14" aria-hidden="true" />
+            {{ d.direction === 'in' ? '流入' : '流出' }}
           </span>
           <span class="bold">{{ d.counterpart }}</span>
           <span class="mono dim">{{ fmtUsd(d.amountUsd) }}</span>

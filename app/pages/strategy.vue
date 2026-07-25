@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Check, Plus } from '@lucide/vue'
 import type { StrategyDoc } from '~/shared/types'
 import { useStrategyStore } from '~/stores/strategy'
 import { useUiStore } from '~/stores/ui'
@@ -10,6 +11,14 @@ const ui = useUiStore()
 const editing = ref<StrategyDoc | null>(null)
 const form = reactive({ name: '', content: '', riskLevel: 3 })
 const showForm = ref(false)
+const formRef = ref<HTMLElement | null>(null)
+
+// 下部の戦略カードから編集を開始した場合もフォームが視界に入るよう追従スクロール
+watch(showForm, async (visible) => {
+  if (!visible) return
+  await nextTick()
+  formRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+})
 
 function startCreate() {
   editing.value = null
@@ -56,6 +65,8 @@ function save() {
 }
 
 function remove(doc: StrategyDoc) {
+  // 削除は取り消せないため確認を挟む（誤タップ防止）
+  if (!window.confirm(`戦略「${doc.name}」を削除しますか？この操作は取り消せません。`)) return
   strategy.removeCustom(doc.id)
   ui.notify(`戦略「${doc.name}」を削除しました`)
 }
@@ -70,7 +81,9 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
   <div>
     <div class="card-title">
       <h1>RAG 戦略設定</h1>
-      <button class="btn btn-primary btn-sm" type="button" @click="startCreate">＋ 新規戦略</button>
+      <button class="btn btn-primary btn-sm" type="button" @click="startCreate">
+        <Plus :size="15" aria-hidden="true" /> 新規戦略
+      </button>
     </div>
     <p class="small dim">
       選択した戦略ドキュメントが AI のプロンプトに注入され、インサイト・デモトレード・実トレードの判断が変わります。
@@ -78,7 +91,7 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
     </p>
 
     <!-- 戦略編集フォーム -->
-    <section v-if="showForm" class="card" style="border-color: var(--accent)">
+    <section v-if="showForm" ref="formRef" class="card" style="border-color: var(--accent)">
       <h2>{{ editing ? '戦略を編集' : '新しい戦略' }}</h2>
       <label class="field">
         <span>戦略名</span>
@@ -103,6 +116,9 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
         <button class="btn btn-ghost" type="button" @click="showForm = false">キャンセル</button>
       </div>
     </section>
+
+    <!-- アカウント連携（データ永続化: AUDIT-9 本対応） -->
+    <AccountLink style="margin-top: 12px" />
 
     <!-- 戦略一覧 -->
     <div class="grid grid-2" style="margin-top: 12px">
@@ -131,7 +147,8 @@ const RISK_LABELS = ['', '保守的', 'やや保守', '標準', '積極的', '�
             :disabled="doc.id === strategy.activeId"
             @click="strategy.setActive(doc.id)"
           >
-            {{ doc.id === strategy.activeId ? '✓ 適用中' : 'この戦略を使う' }}
+            <Check v-if="doc.id === strategy.activeId" :size="14" aria-hidden="true" />
+            {{ doc.id === strategy.activeId ? '適用中' : 'この戦略を使う' }}
           </button>
           <button class="btn btn-sm btn-ghost" type="button" @click="startEdit(doc)">
             {{ doc.builtin ? '複製して編集' : '編集' }}

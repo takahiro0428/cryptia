@@ -8,7 +8,10 @@ import { ERROR_CODES } from '~/shared/errors'
  * 本番強化（Firebase App Check / 認証必須化）は Phase 8 の残課題として記録済み。
  */
 
+/** 匿名（IP キー）の毎分上限 */
 export const RATE_LIMIT_MAX = 20
+/** 認証済み（uid キー）の毎分上限（正規ユーザーを優遇） */
+export const RATE_LIMIT_MAX_AUTHED = 40
 export const RATE_LIMIT_WINDOW_MS = 60_000
 
 interface Bucket {
@@ -22,7 +25,7 @@ const buckets = new Map<string, Bucket>()
 export const MAX_BUCKETS = 10_000
 
 /** 上限内なら消費して true、超過なら false を返す。 */
-export function consumeToken(key: string, now = Date.now()): boolean {
+export function consumeToken(key: string, now = Date.now(), max = RATE_LIMIT_MAX): boolean {
   const bucket = buckets.get(key)
   if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
     if (!bucket && buckets.size >= MAX_BUCKETS) {
@@ -34,7 +37,7 @@ export function consumeToken(key: string, now = Date.now()): boolean {
     buckets.set(key, { count: 1, windowStart: now })
     return true
   }
-  if (bucket.count >= RATE_LIMIT_MAX) return false
+  if (bucket.count >= max) return false
   bucket.count++
   return true
 }

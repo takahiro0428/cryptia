@@ -1,17 +1,40 @@
 import type { FirebaseApp } from 'firebase/app'
 import type { Firestore } from 'firebase/firestore'
+import { CryptiaError, ERROR_CODES } from '~/shared/errors'
 
 /**
  * Firebase 遅延初期化（設定がある場合のみ）。
  * runtimeConfig.public に Firebase 設定が無い環境（ローカル開発・デモ）では
  * null を返し、アプリはローカルストレージのみで全機能動作する（BR-5）。
- * 認証は匿名認証（Phase 3: ユーザー権限）。
+ * 認証は匿名認証（Phase 3: ユーザー権限）。Google アカウントへのリンクで
+ * uid を保持したまま永続化できる（AUDIT-9 対応の本実装）。
  */
+
+export interface AccountInfo {
+  isAnonymous: boolean
+  email: string | null
+}
 
 interface FirebaseContext {
   app: FirebaseApp
   db: Firestore
   uid: string
+  /** AI API 認証用の ID トークン（取得失敗時 null） */
+  getIdToken(): Promise<string | null>
+  /** 匿名アカウントを Google アカウントへリンク（uid は変わらずデータ保持） */
+  linkWithGoogle(): Promise<AccountInfo>
+  /** 現在のアカウント状態 */
+  accountInfo(): AccountInfo
+  /** リダイレクト連携から復帰した際のエラーメッセージを1回だけ取り出す（ISSUE-P8-14） */
+  consumeLinkError(): string | null
+}
+
+/** アカウントリンクのエラーコード → ユーザー向けメッセージ（ポップアップ/リダイレクト共通） */
+function linkErrorMessage(code: string | undefined): string {
+  if (code === 'auth/credential-already-in-use') {
+    return 'この Google アカウントは既に別のデータに連携されています。別のアカウントをお試しください'
+  }
+  return 'アカウント連携がキャンセルまたは失敗しました'
 }
 
 let initPromise: Promise<FirebaseContext | null> | null = null
@@ -47,16 +70,79 @@ export function useFirebase(): Promise<FirebaseContext | null> {
           reject(e)
         })
       })
+      // リダイレクト方式のアカウント連携から復帰した場合の完了処理（ISSUE-P8-11）。
+      // エラーは保持して AccountLink がユーザーへ通知する（黙殺しない: ISSUE-P8-14）
+      let pendingLinkError: string | null = null
+      try {
+        const { getRedirectResult } = await import('firebase/auth')
+        await getRedirectResult(auth)
+      } catch (err) {
+        pendingLinkError = linkErrorMessage((err as { code?: string }).code)
+      }
+
       // 共有プロジェクト同居のため専用の名前付きデータベースを使用する
       // （Security Rules がデータベース単位になり、他アプリのルールと完全分離される）
       const databaseId = config.firebaseDatabaseId || 'cryptia'
-      const db =
-        databaseId === '(default)' ? getFirestore(app) : getFirestore(app, databaseId)
-      return { app, db, uid }
+      const db = databaseId === '(default)' ? getFirestore(app) : getFirestore(app, databaseId)
+
+      return {
+        app,
+        db,
+        uid,
+        async getIdToken() {
+          try {
+            return (await auth.currentUser?.getIdToken()) ?? null
+          } catch {
+            return null
+          }
+        },
+        async linkWithGoogle() {
+          const { GoogleAuthProvider, linkWithPopup, linkWithRedirect } = await import('firebase/auth')
+          const user = auth.currentUser
+          if (!user) {
+            throw new CryptiaError(ERROR_CODES.ACCOUNT_LINK_FAILED, 'サインイン状態を確認できません')
+          }
+          const provider = new GoogleAuthProvider()
+          try {
+            const result = await linkWithPopup(user, provider)
+            return { isAnonymous: result.user.isAnonymous, email: result.user.email }
+          } catch (err) {
+            const code = (err as { code?: string }).code
+            // WebView（Phantom アプリ内ブラウザ等）ではポップアップが開けないため
+            // リダイレクト方式へフォールバックする（ISSUE-P8-11）。
+            // ページ遷移するため戻り値は到達しない（復帰時に getRedirectResult で完了する）
+            if (
+              code === 'auth/popup-blocked' ||
+              code === 'auth/operation-not-supported-in-this-environment' ||
+              code === 'auth/cancelled-popup-request'
+            ) {
+              await linkWithRedirect(user, provider)
+              return { isAnonymous: true, email: null }
+            }
+            throw new CryptiaError(ERROR_CODES.ACCOUNT_LINK_FAILED, linkErrorMessage(code))
+          }
+        },
+        accountInfo() {
+          const user = auth.currentUser
+          return { isAnonymous: user?.isAnonymous ?? true, email: user?.email ?? null }
+        },
+        consumeLinkError() {
+          const message = pendingLinkError
+          pendingLinkError = null
+          return message
+        },
+      }
     } catch (err) {
       console.warn(`Firebase 初期化に失敗（ローカルモードで継続）: ${err instanceof Error ? err.message : err}`)
       return null
     }
   })()
   return initPromise
+}
+
+/** AI API 用の認証ヘッダー（Firebase 未設定環境では空 = 匿名扱い） */
+export async function aiAuthHeaders(): Promise<Record<string, string>> {
+  const ctx = await useFirebase()
+  const token = ctx ? await ctx.getIdToken() : null
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
