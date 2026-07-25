@@ -3,6 +3,7 @@ import {
   Bot,
   ChevronDown,
   ChevronUp,
+  Moon,
   Pause,
   Play,
   Radar,
@@ -13,12 +14,14 @@ import {
   Waves,
 } from '@lucide/vue'
 import { fmtAgo, fmtPct, fmtUsd } from '~/shared/format'
+import { MOONBAG_DEFAULT_STOP_LOSS_PCT } from '~/shared/snipeScoring'
 import {
   DEGEN_METHOD_LABELS,
   DISPLAY_REFRESH_MS,
   MAX_DEGEN_SESSIONS,
   MAX_PAIRS_PER_SESSION,
   normalizeAutoSnipe,
+  usesAutoPipeline,
   useSolanaStore,
   type DegenMethod,
   type DegenSession,
@@ -33,9 +36,11 @@ const allocatedUsd = ref(1_000)
 const method = ref<DegenMethod>('ladder')
 const selectedPairs = ref<string[]>([])
 const sessionName = ref('')
-/** 自動スナイプ設定（最大同時ポジション数・監査基準） */
+/** 自動スナイプ / ムーンバッグ共通の常時監視設定（最大同時ポジション数・監査基準） */
 const autoMaxPositions = ref(5)
 const autoAllowCaution = ref(false)
+/** ムーンバッグの損切りライン（+100% 到達前のみ有効。null = 損切りなし・完全放置） */
+const moonbagStopLoss = ref<number | null>(MOONBAG_DEFAULT_STOP_LOSS_PCT)
 /** 展開中のセッション詳細（約定履歴） */
 const expandedSession = ref<string | null>(null)
 /** 展開中の保有ポジション（`${sessionId}:${pairAddress}`。見たいときだけ押下で可視化） */
@@ -43,8 +48,8 @@ const expandedPosition = ref<string | null>(null)
 /** 展開中の過去セッション（約定履歴の閲覧: F-05） */
 const expandedArchive = ref<number | null>(null)
 
-/** 新規上場リストを使う手法か（スナイプ / 自動スナイプ） */
-const usesFresh = (m: DegenMethod) => m === 'snipe' || m === 'auto-snipe'
+/** 新規上場リストを使う手法か（スナイプ / 自動スナイプ / ムーンバッグ） */
+const usesFresh = (m: DegenMethod) => m === 'snipe' || usesAutoPipeline(m)
 
 function togglePair(addr: string) {
   selectedPairs.value = selectedPairs.value.includes(addr)
@@ -68,7 +73,7 @@ watch(method, (m, prev) => {
 /** 開始後はセッション一覧（ページ上部に描画）へ視点を移動する */
 async function startSession() {
   let autoConfig
-  if (method.value === 'auto-snipe') {
+  if (usesAutoPipeline(method.value)) {
     // 実効値をフォームへ書き戻し、表示と実行のサイレント乖離を防ぐ
     autoConfig = normalizeAutoSnipe({
       maxPositions: autoMaxPositions.value,
@@ -79,10 +84,11 @@ async function startSession() {
   const before = solana.sessions.length
   await solana.start(
     allocatedUsd.value,
-    method.value === 'auto-snipe' ? [] : selectedPairs.value,
+    usesAutoPipeline(method.value) ? [] : selectedPairs.value,
     method.value,
     autoConfig,
     sessionName.value,
+    moonbagStopLoss.value,
   )
   if (solana.sessions.length > before) {
     sessionName.value = ''
@@ -125,6 +131,7 @@ function positionRows(session: DegenSession) {
       valueUsd: p.quantity * price,
       pnlPct,
       triggeredCount: meta?.triggered.length ?? 0,
+      moonbag: meta?.moonbagAt !== undefined,
     }
   })
 }
@@ -136,6 +143,7 @@ const sessionRows = computed(() =>
     summary: solana.summaryOf(s.id),
     equityValues: s.portfolio.equityCurve.map((p) => p.equityUsd),
     positions: positionRows(s),
+    moonbagStats: solana.moonbagStatsOf(s.id),
   })),
 )
 
@@ -198,7 +206,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
     </div>
 
     <!-- 実行中セッション一覧（複数同時実行可能） -->
-    <section v-for="{ s, summary, equityValues, positions } in sessionRows" :key="s.id" class="card session-card">
+    <section v-for="{ s, summary, equityValues, positions, moonbagStats } in sessionRows" :key="s.id" class="card session-card">
       <div class="card-title">
         <h2>
           {{ s.name }}
@@ -239,12 +247,17 @@ useHead({ title: 'Solana魔界 | Cryptia' })
           価格更新: {{ fmtAgo(solana.lastPricesAt) }}（{{ s.running ? '自動売買 実行中' : '一時停止中も約10秒ごとに更新' }}）
         </template>
       </p>
-      <p v-if="s.method === 'auto-snipe'" class="xs dim" style="margin: 0 0 8px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap">
+      <p v-if="usesAutoPipeline(s.method)" class="xs dim" style="margin: 0 0 8px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap">
         <Radar :size="13" aria-hidden="true" />
         常時監視{{ s.running ? '中' : '（一時停止）' }}:
         新規上場 {{ solana.freshTokens.length }} 件 / 監査通過 {{ solana.freshAuditPassedCount(s.autoSnipe.allowCaution) }} 件 /
         累計エントリー {{ s.enteredMints.length }} 件（最大同時 {{ s.autoSnipe.maxPositions }}・{{ s.autoSnipe.allowCaution ? '要注意まで許容' : '候補のみ' }}）
         <template v-if="solana.freshFetchedAt">・監視更新 {{ fmtAgo(solana.freshFetchedAt) }}</template>
+      </p>
+      <p v-if="s.method === 'moonbag'" class="xs moonbag-line" style="margin: 0 0 8px">
+        <Moon :size="13" aria-hidden="true" />
+        ムーンバッグ保有 {{ moonbagStats.count }} 件（評価額 {{ fmtUsd(moonbagStats.valueUsd) }}・+100% 利確済み・売却ルールなしで保持）
+        ・損切り: {{ s.moonbagStopLossPct === null ? 'なし（完全放置）' : `${s.moonbagStopLossPct}%（+100% 到達前のみ）` }}
       </p>
 
       <h3 style="margin-top: 4px">保有ポジション</h3>
@@ -260,7 +273,8 @@ useHead({ title: 'Solana魔界 | Cryptia' })
           <span class="bold">{{ p.symbol }}</span>
           <span class="mono">{{ fmtUsd(p.valueUsd) }}</span>
           <span class="mono" :class="p.pnlPct >= 0 ? 'up' : 'down'">{{ fmtPct(p.pnlPct) }}</span>
-          <span v-if="s.method !== 'ai'" class="xs faint">ラダー発動 {{ p.triggeredCount }}/{{ s.ladderRules.length }}</span>
+          <span v-if="p.moonbag" class="badge badge-moonbag"><Moon :size="10" aria-hidden="true" /> ムーンバッグ保持中</span>
+          <span v-else-if="s.method !== 'ai'" class="xs faint">ラダー発動 {{ p.triggeredCount }}/{{ s.ladderRules.length }}</span>
           <component :is="expandedPosition === `${s.id}:${p.pairAddress}` ? ChevronUp : ChevronDown" :size="15" class="dim chev" aria-hidden="true" />
         </button>
         <SolanaPositionDetail
@@ -318,7 +332,8 @@ useHead({ title: 'Solana魔界 | Cryptia' })
       </div>
       <div class="field">
         <span class="small dim">取引手法</span>
-        <div class="tabs" style="max-width: 680px">
+        <!-- 5 タブは 375px 幅で画面外に溢れるため折り返す（横スクロール依存の解消: 原則8） -->
+        <div class="tabs" style="max-width: 840px; flex-wrap: wrap">
           <button class="tab" :class="{ active: method === 'ladder' }" type="button" @click="method = 'ladder'">
             ラダーロジック
           </button>
@@ -327,6 +342,9 @@ useHead({ title: 'Solana魔界 | Cryptia' })
           </button>
           <button class="tab" :class="{ active: method === 'auto-snipe' }" type="button" @click="method = 'auto-snipe'">
             <Radar :size="13" aria-hidden="true" /> 自動スナイプ
+          </button>
+          <button class="tab" :class="{ active: method === 'moonbag' }" type="button" @click="method = 'moonbag'">
+            <Moon :size="13" aria-hidden="true" /> ムーンバッグ
           </button>
           <button class="tab" :class="{ active: method === 'ai' }" type="button" @click="method = 'ai'">
             AI 取引
@@ -345,17 +363,26 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             随時、等分予算で自動エントリーします。出口は新規上場ハンターと同じ利益確保型ラダー
             （+50% で 30% 利確 → +100% で 30% → +300% で 20%、-40% で全損切り）。一度エントリーしたトークンには再エントリーしません。
           </template>
+          <template v-else-if="method === 'moonbag'">
+            <b>トークンの選択は不要です。</b>自動スナイプと同じ常時監視・監査でエントリーし、出口だけが異なります:
+            <b>+100% 到達で 70% を売却</b>（元本の 1.4 倍 = 元本+40% を確定回収）し、
+            <b>残り 30% は売却ルールなしのムーンバッグとして保持し続けます</b>（損切りも +100% 到達後は無効）。
+            ムーンバッグ化した保有は同時ポジション数に数えないため、新規トークンの監視・エントリーは止まりません。
+            注意: +100% に到達しないトークンは損切りだけが出口です（損切りなし設定はほぼ全損リスク）。
+          </template>
           <template v-else>
             ティックごとに AI（Vertex AI、未接続時はロジック）がスコア・戦略「{{ strategy.docFor('solana').name }}」に基づいて売買を判断します。
           </template>
         </p>
       </div>
 
-      <!-- 自動スナイプ設定 -->
-      <div v-if="method === 'auto-snipe'" class="field">
+      <!-- 自動スナイプ / ムーンバッグ共通の常時監視設定 -->
+      <div v-if="usesAutoPipeline(method)" class="field">
         <div class="grid grid-2">
           <label class="field">
-            <span>最大同時ポジション数（1 枠の予算 = 割当資金 ÷ 本数）</span>
+            <span>
+              最大同時ポジション数（1 枠の予算 = 割当資金 ÷ 本数<template v-if="method === 'moonbag'">。ムーンバッグ化した保有は数えません</template>）
+            </span>
             <input v-model.number="autoMaxPositions" type="number" class="input" min="1" max="10" step="1" inputmode="numeric" />
           </label>
           <label class="field">
@@ -366,6 +393,20 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             </select>
           </label>
         </div>
+        <label v-if="method === 'moonbag'" class="field">
+          <span>損切りライン（+100% 到達前のみ有効。到達後は完全放置）</span>
+          <select v-model="moonbagStopLoss" class="input">
+            <option :value="-50">-50%（推奨）</option>
+            <option :value="-30">-30%（早め）</option>
+            <option :value="-70">-70%（粘る）</option>
+            <option :value="null">なし（完全放置。+100% 未到達のトークンはほぼ全損リスク）</option>
+          </select>
+        </label>
+        <p v-if="method === 'moonbag' && moonbagStopLoss === null" class="xs" style="color: var(--warn)">
+          <TriangleAlert :size="12" class="icon-inline" aria-hidden="true" />
+          損切りなしの損益分岐は「エントリーの約 71% が +100% に到達」という高い前提です（ムーンバッグの上振れを除く）。
+          まずは推奨の -50% でデモ運用し、実際の到達率を確認してからの変更をおすすめします。
+        </p>
         <p class="xs dim">
           最低限の監査 = 総合判定 + 初期流動性 $5k 以上 + mint/freeze 権限の残存が判明していない + 同名再発行 2 件未満。
           監査は取得できた公開情報に基づく選定支援であり、安全性・利益を保証しません。
@@ -375,7 +416,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         <StrategyPicker context="solana" />
       </div>
       <div class="field">
-        <div v-if="method !== 'auto-snipe'" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
+        <div v-if="!usesAutoPipeline(method)" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px">
           <span class="small dim">対象トークン（{{ selectedPairs.length }} / {{ MAX_PAIRS_PER_SESSION }} 選択中）</span>
           <button
             class="btn btn-sm"
@@ -430,6 +471,10 @@ useHead({ title: 'Solana魔界 | Cryptia' })
               上のリストは監視プールのおすすめ上位です（選択は不要）。新規発行トークンは約 30 秒ごとの監視で
               随時プールへ追加され（48 時間で自動失効）、監査通過トークンへ執行直前の最新価格を再取得したうえで自動エントリーします。
             </template>
+            <template v-else-if="method === 'moonbag'">
+              上のリストは監視プールのおすすめ上位です（選択は不要）。エントリーは自動スナイプと同じ常時監視・監査・
+              執行直前の価格再取得で行い、+100% 到達で 70% を売却して残りをムーンバッグとして保持し続けます。
+            </template>
             <template v-else>
               シグナル（mint 権限・再発行照合等）は取得できた公開情報に基づく選定支援であり、安全性や利益を保証しません。
             </template>
@@ -441,7 +486,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         class="btn btn-primary"
         style="width: 100%"
         type="button"
-        :disabled="(method !== 'auto-snipe' && selectedPairs.length === 0) || allocatedUsd < 100 || solana.sessions.length >= MAX_DEGEN_SESSIONS"
+        :disabled="(!usesAutoPipeline(method) && selectedPairs.length === 0) || allocatedUsd < 100 || solana.sessions.length >= MAX_DEGEN_SESSIONS"
         @click="startSession"
       >
         <Play :size="15" aria-hidden="true" /> 魔界トレードを開始
@@ -530,6 +575,14 @@ useHead({ title: 'Solana魔界 | Cryptia' })
   line-height: inherit;
 }
 .pos-btn .chev { margin-left: auto; }
+.moonbag-line { color: var(--accent); display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.badge-moonbag {
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
 .archive-row {
   display: flex;
   gap: 10px;

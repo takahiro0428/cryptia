@@ -115,6 +115,45 @@ export const SNIPE_LADDER_RULES: LadderRule[] = [
   { triggerPct: -40, sellRatio: 1 },
 ]
 
+/**
+ * ムーンバッグ戦略の利確ライン: +100% 到達で 70% を売却。
+ * 売却額 = 数量 0.7 × 価格 2 倍 = 元本の 1.4 倍（元本 + 40% を確定回収）。
+ * 残り 30% はコスト回収済みの「ムーンバッグ」として売却ルールなしで保持し続ける。
+ */
+export const MOONBAG_TAKE_PROFIT_RULE: LadderRule = { triggerPct: 100, sellRatio: 0.7 }
+
+/**
+ * ムーンバッグ戦略の損切り既定値（-50%）。損切りなし（完全放置）だと
+ * +100% に到達しないトークンがほぼ全損になり、損益分岐の到達率が
+ * 約 71%（1 / 1.4。ムーンバッグの上振れを除く）と非常に高くなるため、
+ * 既定は損切りありを推奨する。損切りは +100% 到達前のみ有効で、
+ * 到達後（ムーンバッグ化後）は全ルールが無効化され完全放置になる。
+ */
+export const MOONBAG_DEFAULT_STOP_LOSS_PCT = -50
+
+/**
+ * ムーンバッグ戦略の損切りラインを正規化する。
+ * null は「損切りなし（完全放置）」の明示的な選択としてそのまま通す。
+ * 数値は -90〜-10% にクランプし、不正値は既定の -50% に落とす。
+ */
+export function normalizeMoonbagStopLoss(v: number | null | undefined): number | null {
+  if (v === null) return null
+  const n = Number(v)
+  if (!Number.isFinite(n) || n >= 0) return MOONBAG_DEFAULT_STOP_LOSS_PCT
+  return Math.min(-10, Math.max(-90, Math.round(n)))
+}
+
+/**
+ * ムーンバッグ戦略の出口ラダーを構築する。
+ * ルール順は [利確（index 0）, 損切り?] 固定 — 利確が発動したらストア側で
+ * 残りの全ルール（損切り含む）を triggered に充填してムーンバッグ化する。
+ */
+export function buildMoonbagLadder(stopLossPct: number | null): LadderRule[] {
+  const rules: LadderRule[] = [{ ...MOONBAG_TAKE_PROFIT_RULE }]
+  if (stopLossPct !== null) rules.push({ triggerPct: stopLossPct, sellRatio: 1 })
+  return rules
+}
+
 /** 自動スナイプ監査: エントリーを許可する最低流動性 */
 export const AUTO_SNIPE_MIN_LIQUIDITY_USD = 5_000
 

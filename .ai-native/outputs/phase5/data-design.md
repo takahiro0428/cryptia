@@ -68,6 +68,18 @@ cryptia-users/{uid}/state/{stateKey}
 - スキーマ変更時は `stateKey` を追加する方式とし、既存キーの構造変更は読み込み側の後方互換パースで吸収する
 - デモ/Solana の永続化は複数セッション形式（`sessions[]`）。旧形式（単一 `portfolio` 等の
   トップレベルフィールド）は復元時に 1 セッションへ自動移行する（原則7）
+- ムーンバッグ手法の追加フィールド（セッションの `moonbagStopLossPct`・positionMeta の
+  `moonbagAt` / `mint`）は**加算的**で既存セッションに影響しない（原則7）。復元時は設定値を正規化し、
+  moonbag セッションのラダールールは設定から決定的に再構築する（**設定 `moonbagStopLossPct` が
+  ルール構成の SoT**。改変・欠落データでも設定と実行ルールが乖離しない）
+- **ムーンバッグの恒久増加（設計判断として明記）:** ムーンバッグ保有は全量決済されないため、
+  positions / positionMeta / watchedPairs がセッション寿命にわたり増え続ける（1 件あたり
+  約 0.3KB。他の増加要素 orders / equityCurve / enteredPairs・Mints / archives は全て上限あり）。
+  200KB 予算に対し**数百件規模までは安全**で、想定運用（1 日数件のムーンバッグ化）では到達に
+  数か月を要する。超過時は `fitSessionsToBudget` が約定履歴・資産推移の永続化コピーを段階縮小して
+  保護し、それでも収まらない極端なケースはローカル保存で継続 + 同期警告（CRYPTIA-E601）となる。
+  エントリー履歴（enteredPairs / enteredMints）の 200 件間引きは**保有中（ムーンバッグ含む）の分を
+  保護**し、positionMeta.mint の照合と併せて保有中トークンの別プールへの再エントリーを防ぐ
 - localStorage の破損 JSON は無視して初期状態で継続（クラッシュさせない）
 - アーカイブは最大 20 件・equityCurve は最大 500 点に間引き（ストレージ保護。間引きは古い中間点のみで、最新値と端点は保持）
 - アーカイブの約定履歴（`orders`）は加算的フィールド（旧データは `orders` なしでもサマリー閲覧可: 原則7）。
