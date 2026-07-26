@@ -144,6 +144,8 @@ export interface SolanaToken {
   change24hPct: number
   /** ペア作成からの経過時間（時間） */
   ageHours: number
+  /** 発行時刻（pairCreatedAt）が取得できたか。false = ageHours 0 は「不明」の意（スキャルプの年齢ゲートで除外） */
+  ageKnown?: boolean
   txns24h: number
 }
 

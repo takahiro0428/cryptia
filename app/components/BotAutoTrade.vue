@@ -28,6 +28,7 @@ const botBusy = ref(false)
 const strategyLabel: Record<BotStrategy, string> = {
   'auto-snipe': '自動スナイプ（利益確保型ラダー）',
   moonbag: 'ムーンバッグ（+100%で70%売却→残り保持）',
+  scalp: 'スキャルプ（発行直後買い・早期全量利確で高速回転）',
 }
 
 async function createWallet() {
@@ -251,6 +252,7 @@ onMounted(() => {
           <select v-model="bot.config.strategy" class="input" :disabled="bot.running" @change="bot.setConfig({ strategy: bot.config.strategy })">
             <option value="moonbag">{{ strategyLabel['moonbag'] }}</option>
             <option value="auto-snipe">{{ strategyLabel['auto-snipe'] }}</option>
+            <option value="scalp">{{ strategyLabel['scalp'] }}</option>
           </select>
         </label>
         <label class="field">
@@ -281,7 +283,30 @@ onMounted(() => {
             <option :value="true">「要注意」まで許容</option>
           </select>
         </label>
+        <template v-if="bot.config.strategy === 'scalp'">
+          <label class="field">
+            <span>利確ターゲット（到達で全量売却・%）</span>
+            <input v-model.number="bot.config.scalpTargetPct" type="number" class="input" min="20" max="200" step="10" :disabled="bot.running" @change="bot.setConfig({ scalpTargetPct: bot.config.scalpTargetPct })" />
+          </label>
+          <label class="field">
+            <span>損切りライン（%・負値）</span>
+            <input v-model.number="bot.config.scalpStopPct" type="number" class="input" min="-90" max="-10" step="5" :disabled="bot.running" @change="bot.setConfig({ scalpStopPct: bot.config.scalpStopPct })" />
+          </label>
+          <label class="field">
+            <span>発行からの経過上限（分）</span>
+            <input v-model.number="bot.config.scalpMaxAgeMin" type="number" class="input" min="1" max="30" step="1" :disabled="bot.running" @change="bot.setConfig({ scalpMaxAgeMin: bot.config.scalpMaxAgeMin })" />
+          </label>
+          <label class="field">
+            <span>保有時間の上限（分・届かなければ全量手仕舞い）</span>
+            <input v-model.number="bot.config.scalpMaxHoldMin" type="number" class="input" min="3" max="120" step="1" :disabled="bot.running" @change="bot.setConfig({ scalpMaxHoldMin: bot.config.scalpMaxHoldMin })" />
+          </label>
+        </template>
       </div>
+      <p v-if="bot.config.strategy === 'scalp'" class="xs dim" style="margin: 0 0 6px">
+        スキャルプは検知できた最速の新規発行トークンを高速回転させます（発行検知はフィード経由のため
+        「真の発行 5 分以内」は保証されません）。売買回数が増えるほど手数料・スリッページの累積が
+        損益を圧迫します。1 回のエントリー額と 1 日上限をタイトに設定してください。
+      </p>
 
       <label class="consent xs">
         <input

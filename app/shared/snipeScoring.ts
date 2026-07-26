@@ -154,6 +154,60 @@ export function buildMoonbagLadder(stopLossPct: number | null): LadderRule[] {
   return rules
 }
 
+/**
+ * スキャルプ戦略（超短期回転）: 発行直後（既定 5 分以内）に買い、
+ * 早い利確ターゲット（既定 +50%）で**全量**手放して枠を高速に回転させる。
+ * どちらにも届かない銘柄は時間切れ（既定 15 分）で全量手仕舞い（枠の固定化防止）。
+ */
+export const SCALP_DEFAULT_TARGET_PCT = 50
+export const SCALP_DEFAULT_STOP_PCT = -30
+export const SCALP_DEFAULT_MAX_AGE_MIN = 5
+export const SCALP_DEFAULT_MAX_HOLD_MIN = 15
+
+/** 利確ターゲットの正規化（+20〜+200% にクランプ。不正値は既定 +50%） */
+export function normalizeScalpTarget(v: number | undefined): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SCALP_DEFAULT_TARGET_PCT
+  return Math.min(200, Math.max(20, Math.round(n)))
+}
+
+/** 損切りラインの正規化（-90〜-10%。不正値は既定 -30%） */
+export function normalizeScalpStop(v: number | undefined): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n >= 0) return SCALP_DEFAULT_STOP_PCT
+  return Math.min(-10, Math.max(-90, Math.round(n)))
+}
+
+/** エントリー対象の発行経過上限（分）の正規化（1〜30 分。不正値は既定 5 分） */
+export function normalizeScalpMaxAge(v: number | undefined): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SCALP_DEFAULT_MAX_AGE_MIN
+  return Math.min(30, Math.max(1, Math.round(n)))
+}
+
+/** 保有時間の上限（分）の正規化（3〜120 分。不正値は既定 15 分） */
+export function normalizeScalpMaxHold(v: number | undefined): number {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return SCALP_DEFAULT_MAX_HOLD_MIN
+  return Math.min(120, Math.max(3, Math.round(n)))
+}
+
+/** スキャルプの出口ラダー: [利確ターゲットで全量, 損切りで全量]（時間切れは呼び出し側で別途執行） */
+export function buildScalpLadder(targetPct: number, stopPct: number): LadderRule[] {
+  return [
+    { triggerPct: normalizeScalpTarget(targetPct), sellRatio: 1 },
+    { triggerPct: normalizeScalpStop(stopPct), sellRatio: 1 },
+  ]
+}
+
+/**
+ * スキャルプのエントリー年齢ゲート: 発行からの実効経過分（最終確認時の年齢 + 確認からの経過）。
+ * フィード掲載の遅延があるため「検知できた中で最速」を狙う位置づけ（真の発行 5 分以内を保証しない）。
+ */
+export function effectiveAgeMinutes(ageHours: number, lastSeenAt: number, now: number): number {
+  return ageHours * 60 + Math.max(0, now - lastSeenAt) / 60_000
+}
+
 /** 自動スナイプ監査: エントリーを許可する最低流動性 */
 export const AUTO_SNIPE_MIN_LIQUIDITY_USD = 5_000
 

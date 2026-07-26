@@ -57,6 +57,7 @@ export function toToken(p: DexPair): SolanaToken | null {
     volume24hUsd: p.volume?.h24 ?? 0,
     change24hPct: p.priceChange?.h24 ?? 0,
     ageHours: p.pairCreatedAt ? Math.max(0, (Date.now() - p.pairCreatedAt) / 3_600_000) : 0,
+    ageKnown: Boolean(p.pairCreatedAt),
     txns24h: (h24?.buys ?? 0) + (h24?.sells ?? 0),
   }
 }

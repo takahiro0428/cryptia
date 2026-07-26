@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Moon,
+  Zap,
   Pause,
   Play,
   Radar,
@@ -14,7 +15,13 @@ import {
   Waves,
 } from '@lucide/vue'
 import { fmtAgo, fmtPct, fmtUsd } from '~/shared/format'
-import { MOONBAG_DEFAULT_STOP_LOSS_PCT } from '~/shared/snipeScoring'
+import {
+  MOONBAG_DEFAULT_STOP_LOSS_PCT,
+  SCALP_DEFAULT_MAX_AGE_MIN,
+  SCALP_DEFAULT_MAX_HOLD_MIN,
+  SCALP_DEFAULT_STOP_PCT,
+  SCALP_DEFAULT_TARGET_PCT,
+} from '~/shared/snipeScoring'
 import {
   DEGEN_METHOD_LABELS,
   DISPLAY_REFRESH_MS,
@@ -41,6 +48,11 @@ const autoMaxPositions = ref(5)
 const autoAllowCaution = ref(false)
 /** ムーンバッグの損切りライン（+100% 到達前のみ有効。null = 損切りなし・完全放置） */
 const moonbagStopLoss = ref<number | null>(MOONBAG_DEFAULT_STOP_LOSS_PCT)
+/** スキャルプ設定（発行経過上限・利確ターゲット・損切り・保有時間上限） */
+const scalpTarget = ref(SCALP_DEFAULT_TARGET_PCT)
+const scalpStop = ref(SCALP_DEFAULT_STOP_PCT)
+const scalpMaxAge = ref(SCALP_DEFAULT_MAX_AGE_MIN)
+const scalpMaxHold = ref(SCALP_DEFAULT_MAX_HOLD_MIN)
 /** 展開中のセッション詳細（約定履歴） */
 const expandedSession = ref<string | null>(null)
 /** 展開中の保有ポジション（`${sessionId}:${pairAddress}`。見たいときだけ押下で可視化） */
@@ -48,7 +60,7 @@ const expandedPosition = ref<string | null>(null)
 /** 展開中の過去セッション（約定履歴の閲覧: F-05） */
 const expandedArchive = ref<number | null>(null)
 
-/** 新規上場リストを使う手法か（スナイプ / 自動スナイプ / ムーンバッグ） */
+/** 新規上場リストを使う手法か（スナイプ / 自動スナイプ / ムーンバッグ / スキャルプ） */
 const usesFresh = (m: DegenMethod) => m === 'snipe' || usesAutoPipeline(m)
 
 function togglePair(addr: string) {
@@ -65,9 +77,19 @@ function applyRecommendation() {
 }
 
 // スナイプ系は新規上場リスト・他手法はスクリーニングリストから選ぶため、切替時に選択をリセット
+/** スキャルプ選択前の監査基準（タブを離れたら元へ戻す = 他手法へ設定が残留しない） */
+let allowCautionBeforeScalp = false
 watch(method, (m, prev) => {
   if (usesFresh(m) !== usesFresh(prev)) selectedPairs.value = []
   if (usesFresh(m)) void solana.fetchFreshTokens()
+  // スキャルプは発行直後の銘柄が対象で「候補」判定に届きにくいため、選択中だけ既定を
+  // 「要注意まで許容」へ切り替える（select に反映され、手動で戻せる。離脱時は元の値へ復帰）
+  if (m === 'scalp' && prev !== 'scalp') {
+    allowCautionBeforeScalp = autoAllowCaution.value
+    autoAllowCaution.value = true
+  } else if (prev === 'scalp' && m !== 'scalp') {
+    autoAllowCaution.value = allowCautionBeforeScalp
+  }
 })
 
 /** 開始後はセッション一覧（ページ上部に描画）へ視点を移動する */
@@ -89,10 +111,26 @@ async function startSession() {
     autoConfig,
     sessionName.value,
     moonbagStopLoss.value,
+    method.value === 'scalp'
+      ? {
+          targetPct: scalpTarget.value,
+          stopPct: scalpStop.value,
+          maxAgeMin: scalpMaxAge.value,
+          maxHoldMin: scalpMaxHold.value,
+        }
+      : undefined,
   )
   if (solana.sessions.length > before) {
     sessionName.value = ''
     selectedPairs.value = []
+    // 実効値（クランプ後）をフォームへ書き戻し、表示と実行のサイレント乖離を防ぐ
+    const started = solana.sessions[solana.sessions.length - 1]
+    if (started?.scalp) {
+      scalpTarget.value = started.scalp.targetPct
+      scalpStop.value = started.scalp.stopPct
+      scalpMaxAge.value = started.scalp.maxAgeMin
+      scalpMaxHold.value = started.scalp.maxHoldMin
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 }
@@ -254,6 +292,11 @@ useHead({ title: 'Solana魔界 | Cryptia' })
         累計エントリー {{ s.enteredMints.length }} 件（最大同時 {{ s.autoSnipe.maxPositions }}・{{ s.autoSnipe.allowCaution ? '要注意まで許容' : '候補のみ' }}）
         <template v-if="solana.freshFetchedAt">・監視更新 {{ fmtAgo(solana.freshFetchedAt) }}</template>
       </p>
+      <p v-if="s.scalp" class="xs dim" style="margin: 0 0 8px">
+        <Zap :size="12" class="icon-inline" aria-hidden="true" />
+        スキャルプ設定: +{{ s.scalp.targetPct }}% で全量利確 / {{ s.scalp.stopPct }}% 損切り /
+        発行 {{ s.scalp.maxAgeMin }} 分以内のみ / 保有上限 {{ s.scalp.maxHoldMin }} 分
+      </p>
       <p v-if="s.method === 'moonbag'" class="xs moonbag-line" style="margin: 0 0 8px">
         <Moon :size="13" aria-hidden="true" />
         ムーンバッグ保有 {{ moonbagStats.count }} 件（評価額 {{ fmtUsd(moonbagStats.valueUsd) }}・+100% 利確済み・売却ルールなしで保持）
@@ -346,6 +389,9 @@ useHead({ title: 'Solana魔界 | Cryptia' })
           <button class="tab" :class="{ active: method === 'moonbag' }" type="button" @click="method = 'moonbag'">
             <Moon :size="13" aria-hidden="true" /> ムーンバッグ
           </button>
+          <button class="tab" :class="{ active: method === 'scalp' }" type="button" @click="method = 'scalp'">
+            <Zap :size="13" aria-hidden="true" /> スキャルプ
+          </button>
           <button class="tab" :class="{ active: method === 'ai' }" type="button" @click="method = 'ai'">
             AI 取引
           </button>
@@ -370,6 +416,13 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             ムーンバッグ化した保有は同時ポジション数に数えないため、新規トークンの監視・エントリーは止まりません。
             注意: +100% に到達しないトークンは損切りだけが出口です（損切りなし設定はほぼ全損リスク）。
           </template>
+          <template v-else-if="method === 'scalp'">
+            <b>トークンの選択は不要です。</b>監視プールのうち<b>発行直後（既定 5 分以内）に検知できたトークンだけ</b>へエントリーし、
+            <b>早い利確ターゲット（既定 +50%）で全量売却</b>して枠を高速に回転させます。損切り（既定 -30%）と
+            <b>時間切れ手仕舞い（既定 15 分・どちらにも届かない銘柄を全量手放して次へ）</b>つき。
+            一度エントリーしたトークンには再エントリーしません。
+            注意: 発行検知は DexScreener フィード経由のため掲載遅延があり、「真の発行 5 分以内」を保証するものではありません。
+          </template>
           <template v-else>
             ティックごとに AI（Vertex AI、未接続時はロジック）がスコア・戦略「{{ strategy.docFor('solana').name }}」に基づいて売買を判断します。
           </template>
@@ -389,7 +442,7 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             <span>監査基準</span>
             <select v-model="autoAllowCaution" class="input">
               <option :value="false">「候補」判定のみ（推奨）</option>
-              <option :value="true">「要注意」判定まで許容（積極的）</option>
+              <option :value="true">{{ method === 'scalp' ? '「要注意」判定まで許容（スキャルプ推奨・自動選択済み）' : '「要注意」判定まで許容（積極的）' }}</option>
             </select>
           </label>
         </div>
@@ -402,6 +455,33 @@ useHead({ title: 'Solana魔界 | Cryptia' })
             <option :value="null">なし（完全放置。+100% 未到達のトークンはほぼ全損リスク）</option>
           </select>
         </label>
+        <div v-if="method === 'scalp'" class="grid grid-2">
+          <label class="field">
+            <span>利確ターゲット（到達で全量売却）</span>
+            <select v-model.number="scalpTarget" class="input">
+              <option :value="50">+50%（既定・回転重視）</option>
+              <option :value="70">+70%</option>
+              <option :value="100">+100%</option>
+              <option :value="30">+30%（最速）</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>損切りライン</span>
+            <select v-model.number="scalpStop" class="input">
+              <option :value="-30">-30%（既定・タイト）</option>
+              <option :value="-20">-20%</option>
+              <option :value="-50">-50%</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>発行からの経過上限（分・これ以内に検知した銘柄のみ買う）</span>
+            <input v-model.number="scalpMaxAge" type="number" class="input" min="1" max="30" step="1" inputmode="numeric" />
+          </label>
+          <label class="field">
+            <span>保有時間の上限（分・届かなければ全量手仕舞い）</span>
+            <input v-model.number="scalpMaxHold" type="number" class="input" min="3" max="120" step="1" inputmode="numeric" />
+          </label>
+        </div>
         <p v-if="method === 'moonbag' && moonbagStopLoss === null" class="xs" style="color: var(--warn)">
           <TriangleAlert :size="12" class="icon-inline" aria-hidden="true" />
           損切りなしの損益分岐は「エントリーの約 71% が +100% に到達」という高い前提です（ムーンバッグの上振れを除く）。
