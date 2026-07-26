@@ -9,9 +9,19 @@ import { DEX_PAIRS_URL, isValidAddress, toToken, type DexPair } from '~/shared/d
 import { CryptiaError, ERROR_CODES, formatError } from '~/shared/errors'
 import {
   buildMoonbagLadder,
+  buildScalpLadder,
+  effectiveAgeMinutes,
   MOONBAG_DEFAULT_STOP_LOSS_PCT,
   normalizeMoonbagStopLoss,
+  normalizeScalpMaxAge,
+  normalizeScalpMaxHold,
+  normalizeScalpStop,
+  normalizeScalpTarget,
   passesMinimalAudit,
+  SCALP_DEFAULT_MAX_AGE_MIN,
+  SCALP_DEFAULT_MAX_HOLD_MIN,
+  SCALP_DEFAULT_STOP_PCT,
+  SCALP_DEFAULT_TARGET_PCT,
   SNIPE_LADDER_RULES,
 } from '~/shared/snipeScoring'
 import { checkLadder } from '~/shared/tradeEngine'
@@ -52,7 +62,7 @@ const MAX_DATA_AGE_MS = 5 * 60 * 1000
 /** 1 回のエントリーの下限（これ未満は手数料負けする） */
 export const MIN_ENTRY_SOL = 0.01
 
-export type BotStrategy = 'auto-snipe' | 'moonbag'
+export type BotStrategy = 'auto-snipe' | 'moonbag' | 'scalp'
 
 export interface BotConfig {
   strategy: BotStrategy
@@ -65,6 +75,11 @@ export interface BotConfig {
   /** 1 日の買い合計の上限（SOL） */
   dailyMaxSol: number
   riskConsentAt: number | null
+  /** scalp 戦略の設定（他戦略では既定値のまま未使用） */
+  scalpTargetPct: number
+  scalpStopPct: number
+  scalpMaxAgeMin: number
+  scalpMaxHoldMin: number
 }
 
 export const DEFAULT_BOT_CONFIG: BotConfig = {
@@ -75,6 +90,10 @@ export const DEFAULT_BOT_CONFIG: BotConfig = {
   stopLossPct: MOONBAG_DEFAULT_STOP_LOSS_PCT,
   dailyMaxSol: 0.5,
   riskConsentAt: null,
+  scalpTargetPct: SCALP_DEFAULT_TARGET_PCT,
+  scalpStopPct: SCALP_DEFAULT_STOP_PCT,
+  scalpMaxAgeMin: SCALP_DEFAULT_MAX_AGE_MIN,
+  scalpMaxHoldMin: SCALP_DEFAULT_MAX_HOLD_MIN,
 }
 
 export interface BotPosition {
@@ -93,6 +112,8 @@ export interface BotPosition {
   triggered: number[]
   moonbagAt?: number
   enteredAt: number
+  /** scalp: 保有時間上限のスナップショット（設定変更が既存保有へ遡及しない: ISSUE-P9-M20 と同原則） */
+  maxHoldMin?: number
   /** 確認タイムアウトした売却 Tx（着地を実残高照合で確定した際のログ用: ISSUE-P9-L41） */
   pendingTxid?: string
 }
@@ -196,7 +217,9 @@ export const useBotTradeStore = defineStore('botTrade', {
     ladderRules(state): LadderRule[] {
       return state.config.strategy === 'moonbag'
         ? buildMoonbagLadder(state.config.stopLossPct)
-        : SNIPE_LADDER_RULES
+        : state.config.strategy === 'scalp'
+          ? buildScalpLadder(state.config.scalpTargetPct, state.config.scalpStopPct)
+          : SNIPE_LADDER_RULES
     },
     /** 当日の買い合計（SOL）。日付が変わったら 0 から */
     todaysSpentSol(state): number {
@@ -220,7 +243,12 @@ export const useBotTradeStore = defineStore('botTrade', {
         const num = (v: unknown, fallback: number) =>
           typeof v === 'number' && Number.isFinite(v) ? v : fallback
         this.config = {
-          strategy: saved.config?.strategy === 'auto-snipe' ? 'auto-snipe' : 'moonbag',
+          strategy:
+            saved.config?.strategy === 'auto-snipe'
+              ? 'auto-snipe'
+              : saved.config?.strategy === 'scalp'
+                ? 'scalp'
+                : 'moonbag',
           entrySol: Math.max(MIN_ENTRY_SOL, num(saved.config?.entrySol, DEFAULT_BOT_CONFIG.entrySol)),
           maxPositions: Math.min(10, Math.max(1, Math.round(num(saved.config?.maxPositions, 3)))),
           allowCaution: saved.config?.allowCaution === true,
@@ -228,6 +256,10 @@ export const useBotTradeStore = defineStore('botTrade', {
           dailyMaxSol: Math.max(0, num(saved.config?.dailyMaxSol, DEFAULT_BOT_CONFIG.dailyMaxSol)),
           riskConsentAt:
             typeof saved.config?.riskConsentAt === 'number' ? saved.config.riskConsentAt : null,
+          scalpTargetPct: normalizeScalpTarget(saved.config?.scalpTargetPct),
+          scalpStopPct: normalizeScalpStop(saved.config?.scalpStopPct),
+          scalpMaxAgeMin: normalizeScalpMaxAge(saved.config?.scalpMaxAgeMin),
+          scalpMaxHoldMin: normalizeScalpMaxHold(saved.config?.scalpMaxHoldMin),
         }
         this.positions = (Array.isArray(saved.positions) ? saved.positions : []).filter(
           (pos): pos is BotPosition =>
@@ -242,6 +274,8 @@ export const useBotTradeStore = defineStore('botTrade', {
             pos.entryPriceUsd > 0 &&
             Array.isArray(pos.triggered) &&
             pos.triggered.every((i: unknown) => Number.isInteger(i)) &&
+            typeof pos.enteredAt === 'number' &&
+            Number.isFinite(pos.enteredAt) &&
             (pos.pendingTxid === undefined || typeof pos.pendingTxid === 'string'),
         )
         this.enteredMints = (Array.isArray(saved.enteredMints) ? saved.enteredMints : []).filter(
@@ -278,6 +312,10 @@ export const useBotTradeStore = defineStore('botTrade', {
       this.config.entrySol = Math.max(MIN_ENTRY_SOL, Number(this.config.entrySol) || MIN_ENTRY_SOL)
       this.config.maxPositions = Math.min(10, Math.max(1, Math.round(this.config.maxPositions) || 1))
       this.config.dailyMaxSol = Math.max(0, Number(this.config.dailyMaxSol) || 0)
+      this.config.scalpTargetPct = normalizeScalpTarget(this.config.scalpTargetPct)
+      this.config.scalpStopPct = normalizeScalpStop(this.config.scalpStopPct)
+      this.config.scalpMaxAgeMin = normalizeScalpMaxAge(this.config.scalpMaxAgeMin)
+      this.config.scalpMaxHoldMin = normalizeScalpMaxHold(this.config.scalpMaxHoldMin)
       this._save()
     },
     /**
@@ -531,6 +569,25 @@ export const useBotTradeStore = defineStore('botTrade', {
         for (const position of [...this.positions]) {
           if (!this.running) break
           if (position.moonbagAt) continue
+          // スキャルプ: 利確にも損切りにも届かない銘柄は時間切れで全量手仕舞い（枠の固定化防止）。
+          // 価格フィード喪失（ラグ等）でも執行する — 売却は Jupiter 見積りベースで表示価格は不要
+          // （ISSUE-P9-M24）。上限はエントリー時のスナップショットを優先（ISSUE-P9-L43）
+          if (
+            position.strategy === 'scalp' &&
+            Date.now() - position.enteredAt >
+              normalizeScalpMaxHold(position.maxHoldMin ?? this.config.scalpMaxHoldMin) * 60_000
+          ) {
+            await this._sell(
+              position,
+              1,
+              -1,
+              false,
+              0,
+              position.ladder?.length ? position.ladder : this.ladderRules,
+              `スキャルプ時間切れ: ${normalizeScalpMaxHold(position.maxHoldMin ?? this.config.scalpMaxHoldMin)} 分以内に利確/損切りへ届かず全量手仕舞い（枠を回転）`,
+            )
+            continue
+          }
           const price = prices[position.pairAddress]
           if (!price) continue
           // 出口はエントリー時のラダースナップショットで判定（設定変更の影響を受けない）
@@ -560,6 +617,18 @@ export const useBotTradeStore = defineStore('botTrade', {
           if (this.enteredMints.includes(mint)) continue
           if (this.positions.some((p) => p.mint === mint)) continue
           if (!isValidAddress(mint) || !isValidAddress(addr) || score.token.priceUsd <= 0) continue
+          // スキャルプ: 発行直後（実効経過が上限以内）のトークンだけを対象にする
+          if (
+            this.config.strategy === 'scalp' &&
+            (!score.token.ageKnown ||
+              effectiveAgeMinutes(
+              score.token.ageHours,
+              solana.freshSeenAt[addr] ?? solana.freshFetchedAt,
+              now,
+              ) > this.config.scalpMaxAgeMin)
+          ) {
+            continue
+          }
           // SOL 建て上限の強制（署名前・安全側）
           const entrySol = this.config.entrySol
           if (this.todaysSpentSol + plannedSol + entrySol > this.config.dailyMaxSol) break
@@ -631,6 +700,7 @@ export const useBotTradeStore = defineStore('botTrade', {
           symbol,
           strategy: this.config.strategy,
           ladder: this.ladderRules.map((r) => ({ ...r })),
+          maxHoldMin: this.config.strategy === 'scalp' ? this.config.scalpMaxHoldMin : undefined,
           entryPriceUsd: priceUsd,
           amountRaw: quote.outAmount,
           entrySol,
@@ -651,6 +721,7 @@ export const useBotTradeStore = defineStore('botTrade', {
       isMoonbagTp: boolean,
       triggerPct: number,
       rules: LadderRule[],
+      reasonOverride?: string,
     ) {
       try {
         let sellRaw = sellPortionRaw(position.amountRaw, sellRatio)
@@ -714,11 +785,13 @@ export const useBotTradeStore = defineStore('botTrade', {
         position.amountRaw =
           sellRatio >= 1 ? '0' : String(BigInt(position.amountRaw) - BigInt(sellRaw))
         const outSol = Number(quote.outAmount) / LAMPORTS_PER_SOL
-        const reason = isMoonbagTp
-          ? `ムーンバッグ利確: +${triggerPct}% 到達で ${Math.round(sellRatio * 100)}% を売却（残りは保持）`
-          : triggerPct >= 0
-            ? `ラダー利確: +${triggerPct}% 到達で ${Math.round(sellRatio * 100)}% 決済`
-            : `ラダー損切り: ${triggerPct}% 到達で全量決済`
+        const reason =
+          reasonOverride ??
+          (isMoonbagTp
+            ? `ムーンバッグ利確: +${triggerPct}% 到達で ${Math.round(sellRatio * 100)}% を売却（残りは保持）`
+            : triggerPct >= 0
+              ? `ラダー利確: +${triggerPct}% 到達で ${Math.round(sellRatio * 100)}% 決済`
+              : `ラダー損切り: ${triggerPct}% 到達で全量決済`)
         this._log('sell', position.symbol, position.mint, outSol, txid, reason)
         if (isMoonbagTp) {
           position.moonbagAt = Date.now()

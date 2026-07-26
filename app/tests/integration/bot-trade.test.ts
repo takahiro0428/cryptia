@@ -37,6 +37,7 @@ function freshScore(tokenOverrides: Partial<SolanaToken> = {}): SnipeScore {
     volume24hUsd: 100_000,
     change24hPct: 20,
     ageHours: 3,
+    ageKnown: true,
     txns24h: 500,
     ...tokenOverrides,
   }
@@ -379,6 +380,78 @@ describe('botTrade: 自動実行エンジン', () => {
     expect(txid).toBe('withdraw-txid')
     expect(sentTx).toHaveLength(1)
     expect(bot.log[0].reason).toContain('出金')
+  })
+
+  it('スキャルプ戦略: 年齢ゲートでエントリーを絞り、時間切れで全量手仕舞いする', async () => {
+    const young = freshScore({ ageHours: 0.05, priceUsd: 0.001 }) // 3 分
+    const old = freshScore({ ageHours: 0.5 }) // 30 分
+    const { bot, sends } = await setupBot([young, old])
+    bot.setConfig({ strategy: 'scalp' })
+    await bot.tick()
+    // 発行直後の銘柄のみエントリー
+    expect(sends).toHaveLength(1)
+    expect(bot.positions).toHaveLength(1)
+    expect(bot.positions[0].mint).toBe(young.token.baseAddress)
+    expect(bot.positions[0].strategy).toBe('scalp')
+
+    // 16 分経過・どのラインにも届かない → 時間切れで全量売却
+    bot.positions[0].enteredAt = Date.now() - 16 * 60_000
+    useSolanaStore().freshTokens = []
+    bot._fetchPositionPrices = vi.fn(async () => ({ [bot.positions[0].pairAddress]: 0.0011 }))
+    await bot.tick()
+    expect(bot.positions).toHaveLength(0)
+    expect(bot.log[0].side).toBe('sell')
+    expect(bot.log[0].reason).toContain('時間切れ')
+  })
+
+  it('スキャルプ戦略: 価格フィード喪失でも時間切れは執行される（ISSUE-P9-M24）', async () => {
+    const good = freshScore({ ageHours: 0.05, priceUsd: 0.001 })
+    const { bot } = await setupBot([good])
+    bot.setConfig({ strategy: 'scalp' })
+    await bot.tick()
+    bot.positions[0].enteredAt = Date.now() - 16 * 60_000
+    useSolanaStore().freshTokens = []
+    bot._fetchPositionPrices = vi.fn(async () => ({})) // 価格が一切取れない
+    await bot.tick()
+    expect(bot.positions).toHaveLength(0) // Jupiter 見積りベースで売却され枠が回転
+    expect(bot.log[0].reason).toContain('時間切れ')
+  })
+
+  it('スキャルプ戦略: 復元時に scalp 設定を正規化し、不正な enteredAt のポジションは除外する', async () => {
+    const bot = useBotTradeStore()
+    await bot.createWallet('passphrase123', OWNER)
+    const { saveLocal } = await import('~/composables/usePersistence')
+    saveLocal('bot-trade-state', {
+      config: { strategy: 'scalp', scalpTargetPct: 9999, scalpStopPct: 5, scalpMaxAgeMin: -1, scalpMaxHoldMin: 0 },
+      positions: [
+        { mint: 'a', pairAddress: 'a', symbol: 'A', strategy: 'scalp', ladder: [], entryPriceUsd: 1, amountRaw: '10', entrySol: 0.1, triggered: [], enteredAt: 'broken' },
+      ],
+      enteredMints: [],
+      log: [],
+      dailySpent: { day: '2026-01-01', sol: 0 },
+    })
+    setActivePinia(createPinia())
+    const restored = useBotTradeStore()
+    restored.restoreState()
+    expect(restored.config.strategy).toBe('scalp')
+    expect(restored.config.scalpTargetPct).toBe(200)
+    expect(restored.config.scalpStopPct).toBe(-30)
+    expect(restored.config.scalpMaxAgeMin).toBe(5)
+    expect(restored.config.scalpMaxHoldMin).toBe(15)
+    expect(restored.positions).toHaveLength(0) // enteredAt 不正は除外
+  })
+
+  it('スキャルプ戦略: 利確ターゲット到達で全量売却する（既定 +50%）', async () => {
+    const good = freshScore({ ageHours: 0.05, priceUsd: 0.001 })
+    const { bot } = await setupBot([good])
+    bot.setConfig({ strategy: 'scalp' })
+    await bot.tick()
+    const position = bot.positions[0]
+    useSolanaStore().freshTokens = []
+    bot._fetchPositionPrices = vi.fn(async () => ({ [position.pairAddress]: 0.0015 })) // +50%
+    await bot.tick()
+    expect(bot.positions).toHaveLength(0) // 全量売却で枠が空く
+    expect(bot.log[0].reason).toContain('ラダー利確')
   })
 
   it('リスク未同意・上限未設定・ロック状態では開始できない', async () => {

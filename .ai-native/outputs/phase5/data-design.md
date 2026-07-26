@@ -80,6 +80,10 @@ cryptia-users/{uid}/state/{stateKey}
   保護し、それでも収まらない極端なケースはローカル保存で継続 + 同期警告（CRYPTIA-E601）となる。
   エントリー履歴（enteredPairs / enteredMints）の 200 件間引きは**保有中（ムーンバッグ含む）の分を
   保護**し、positionMeta.mint の照合と併せて保有中トークンの別プールへの再エントリーを防ぐ
+- スキャルプ手法の追加フィールド（`DegenSession.scalp`（ScalpConfig）・`PositionMeta.enteredAt`・
+  ボット `BotConfig.scalp*` / `BotPosition.maxHoldMin`）も**加算的**（原則7）。設定が SoT で復元時に
+  正規化 + ラダー再構築（moonbag と同方式）。`enteredAt` は時間切れ手仕舞いの判定に使うため
+  ボット復元時は数値検証し、不正値のポジションは除外する
 - localStorage の破損 JSON は無視して初期状態で継続（クラッシュさせない）
 - **ボットウォレット（F-13）は端末ローカル限定:** `bot-wallet-key`（PBKDF2+AES-GCM 暗号化鍵・出金先アドレス）と
   `bot-trade-state`（設定・ポジション・実行ログ）は `saveLocal` のみで保存し、**Firestore へは決して同期しない**

@@ -13,6 +13,12 @@ import { ERROR_CODES, formatError } from '~/shared/errors'
 import { mockSolanaTokens } from '~/shared/mockData'
 import {
   buildMoonbagLadder,
+  buildScalpLadder,
+  effectiveAgeMinutes,
+  normalizeScalpMaxAge,
+  normalizeScalpMaxHold,
+  normalizeScalpStop,
+  normalizeScalpTarget,
   FRESH_DISPLAY_MAX,
   mergeFreshPool,
   MOONBAG_DEFAULT_STOP_LOSS_PCT,
@@ -78,7 +84,7 @@ const ARCHIVE_ORDERS_MAX = 100
 /** 約定履歴を保持するアーカイブ数（それより古いものはサマリーのみ残す） */
 const ARCHIVE_ORDERS_KEEP = 10
 
-export type DegenMethod = 'ai' | 'ladder' | 'snipe' | 'auto-snipe' | 'moonbag'
+export type DegenMethod = 'ai' | 'ladder' | 'snipe' | 'auto-snipe' | 'moonbag' | 'scalp'
 
 export const DEGEN_METHOD_LABELS: Record<DegenMethod, string> = {
   ladder: 'ラダー',
@@ -86,15 +92,34 @@ export const DEGEN_METHOD_LABELS: Record<DegenMethod, string> = {
   snipe: 'スナイプ',
   'auto-snipe': '自動スナイプ',
   moonbag: 'ムーンバッグ',
+  scalp: 'スキャルプ',
 }
 
 /**
  * 常時監視エントリー（自動スナイプ系パイプライン）を使う手法か。
  * true の手法はトークン選択不要 — 新規上場プールの監査通過トークンへ随時エントリーする。
- * 出口だけが異なる: auto-snipe = 利益確保型ラダー / moonbag = +100% で 70% 売却 → 残り恒久保持
+ * 出口だけが異なる: auto-snipe = 利益確保型ラダー / moonbag = +100% で 70% 売却 → 残り恒久保持 /
+ * scalp = 発行直後のみ買い、早い利確ターゲットで全量売却して高速回転（時間切れ手仕舞いつき）
  */
 export function usesAutoPipeline(m: DegenMethod): boolean {
-  return m === 'auto-snipe' || m === 'moonbag'
+  return m === 'auto-snipe' || m === 'moonbag' || m === 'scalp'
+}
+
+/** スキャルプ設定（正規化済みで保持。復元時もラダーはここから再構築 = 設定が SoT） */
+export interface ScalpConfig {
+  targetPct: number
+  stopPct: number
+  maxAgeMin: number
+  maxHoldMin: number
+}
+
+export function normalizeScalpConfig(cfg?: Partial<ScalpConfig>): ScalpConfig {
+  return {
+    targetPct: normalizeScalpTarget(cfg?.targetPct),
+    stopPct: normalizeScalpStop(cfg?.stopPct),
+    maxAgeMin: normalizeScalpMaxAge(cfg?.maxAgeMin),
+    maxHoldMin: normalizeScalpMaxHold(cfg?.maxHoldMin),
+  }
 }
 
 /** 自動スナイプ（常時監視）の設定 */
@@ -132,6 +157,8 @@ interface PositionMeta {
    * 同時ポジション数にも数えない（新規エントリー枠を塞がない）
    */
   moonbagAt?: number
+  /** エントリー時刻（スキャルプの時間切れ手仕舞い判定用。加算的フィールド） */
+  enteredAt?: number
   /**
    * 保有トークンのミント（baseAddress）。エントリー履歴（enteredMints）の
    * 200 件間引きから独立して「現在保有中のミント」を照合できるようにする
@@ -163,6 +190,8 @@ export interface DegenSession {
    * moonbag 以外の手法では undefined
    */
   moonbagStopLossPct?: number | null
+  /** スキャルプ手法の設定（scalp 以外では undefined） */
+  scalp?: ScalpConfig
 }
 
 interface DegenArchive {
@@ -318,16 +347,20 @@ export const useSolanaStore = defineStore('solana', {
             // 復元時も開始時と同じクランプを通す（別バージョン・改変データへの防御）
             const moonbagStopLossPct =
               s.method === 'moonbag' ? normalizeMoonbagStopLoss(s.moonbagStopLossPct) : undefined
+            const scalp = s.method === 'scalp' ? normalizeScalpConfig(s.scalp) : undefined
             return {
               ...s,
               autoSnipe: normalizeAutoSnipe(s.autoSnipe),
               moonbagStopLossPct,
-              // moonbag はルール構成が設定から一意に決まるため再構築し、
-              // 設定（moonbagStopLossPct）と実行ルールの乖離を防ぐ
+              scalp,
+              // moonbag / scalp はルール構成が設定から一意に決まるため再構築し、
+              // 設定と実行ルールの乖離を防ぐ（設定が SoT）
               ladderRules:
                 s.method === 'moonbag'
                   ? buildMoonbagLadder(moonbagStopLossPct ?? null)
-                  : s.ladderRules,
+                  : scalp
+                    ? buildScalpLadder(scalp.targetPct, scalp.stopPct)
+                    : s.ladderRules,
             }
           })
         } else if (saved.portfolio) {
@@ -625,6 +658,7 @@ export const useSolanaStore = defineStore('solana', {
       name = '',
       // 引数省略時は推奨の -50%。損切りなし（完全放置）は null の明示指定のみ
       moonbagStopLossPct: number | null = MOONBAG_DEFAULT_STOP_LOSS_PCT,
+      scalpConfig?: Partial<ScalpConfig>,
     ) {
       const ui = useUiStore()
       if (this.sessions.length >= MAX_DEGEN_SESSIONS) {
@@ -657,6 +691,7 @@ export const useSolanaStore = defineStore('solana', {
       try {
         const normalizedStopLoss =
           method === 'moonbag' ? normalizeMoonbagStopLoss(moonbagStopLossPct) : undefined
+        const normalizedScalp = method === 'scalp' ? normalizeScalpConfig(scalpConfig) : undefined
         const session: DegenSession = {
           id: newSessionId(),
           name:
@@ -669,15 +704,18 @@ export const useSolanaStore = defineStore('solana', {
           ladderRules:
             method === 'moonbag'
               ? buildMoonbagLadder(normalizedStopLoss ?? null)
-              : method === 'snipe' || method === 'auto-snipe'
-                ? [...SNIPE_LADDER_RULES]
-                : [...DEFAULT_LADDER_RULES],
+              : normalizedScalp
+                ? buildScalpLadder(normalizedScalp.targetPct, normalizedScalp.stopPct)
+                : method === 'snipe' || method === 'auto-snipe'
+                  ? [...SNIPE_LADDER_RULES]
+                  : [...DEFAULT_LADDER_RULES],
           watchedPairs: [...pairAddresses],
           positionMeta: {},
           autoSnipe: normalizeAutoSnipe(autoConfig),
           enteredPairs: [],
           enteredMints: [],
           moonbagStopLossPct: normalizedStopLoss,
+          scalp: normalizedScalp,
         }
         this.sessions.push(session)
 
@@ -867,6 +905,17 @@ export const useSolanaStore = defineStore('solana', {
         if (positionOf(session.portfolio, addr)) continue
         // 保有中（ムーンバッグ含む）ミントの別プールにも入らない（履歴間引き後の防衛: ISSUE-P9-M14）
         if (heldMints.has(score.token.baseAddress)) continue
+        // スキャルプ: 発行直後（実効経過が上限以内）のトークンだけを対象にする。
+        // 発行時刻が取得できないトークン（ageHours 0 = 不明）は年齢を検証できないため除外（安全側）
+        if (session.scalp) {
+          if (!score.token.ageKnown) continue
+          const ageMin = effectiveAgeMinutes(
+            score.token.ageHours,
+            this.freshSeenAt[addr] ?? this.freshFetchedAt,
+            now,
+          )
+          if (ageMin > session.scalp.maxAgeMin) continue
+        }
         candidates.push(score)
       }
       if (candidates.length === 0) return
@@ -902,20 +951,26 @@ export const useSolanaStore = defineStore('solana', {
         if (notionalUsd < AUTO_SNIPE_MIN_ENTRY_USD) break
         if (score.token.priceUsd <= 0) continue
         try {
-          const isMoonbag = session.method === 'moonbag'
+          const entryLabel =
+            session.method === 'moonbag'
+              ? 'ムーンバッグ戦略'
+              : session.method === 'scalp'
+                ? 'スキャルプ戦略'
+                : '自動スナイプ'
           const result = executeOrder(session.portfolio, {
             assetId: addr,
             side: 'buy',
             notionalUsd,
             priceUsd: score.token.priceUsd,
-            reason: `${isMoonbag ? 'ムーンバッグ戦略' : '自動スナイプ'}: 監査通過（スコア ${score.total}・${score.verdict === 'candidate' ? '候補' : '要注意'}）の新規上場 ${score.token.baseSymbol} へエントリー`,
-            strategy: isMoonbag ? 'ムーンバッグ' : '自動スナイプ',
+            reason: `${entryLabel}: 監査通過（スコア ${score.total}・${score.verdict === 'candidate' ? '候補' : '要注意'}）の新規上場 ${score.token.baseSymbol} へエントリー`,
+            strategy: entryLabel.replace('戦略', ''),
           })
           session.portfolio = result.portfolio
           session.positionMeta[addr] = {
             entryPriceUsd: score.token.priceUsd,
             triggered: [],
             mint: score.token.baseAddress,
+            enteredAt: Date.now(),
           }
           session.enteredPairs.push(addr)
           session.enteredMints.push(score.token.baseAddress)
@@ -948,6 +1003,49 @@ export const useSolanaStore = defineStore('solana', {
         const current = this.sessionById(sessionId)
         if (!current || !current.running) return
         const token = this.tokenOf(addr)
+        // スキャルプの時間切れは価格が取れない銘柄（ラグ等でフィード喪失）でも必ず執行する —
+        // 最も手放したい銘柄で枠が恒久固定しないように（ISSUE-P9-M24）
+        if (current.method === 'scalp' && current.scalp) {
+          const meta = current.positionMeta[addr]
+          const timeoutPos = positionOf(current.portfolio, addr)
+          if (
+            meta &&
+            timeoutPos &&
+            timeoutPos.quantity > 0 &&
+            meta.enteredAt !== undefined &&
+            meta.triggered.length < current.ladderRules.length &&
+            Date.now() - meta.enteredAt > current.scalp.maxHoldMin * 60_000
+          ) {
+            const exitPrice = token && token.priceUsd > 0 ? token.priceUsd : 0
+            if (exitPrice > 0 && timeoutPos.quantity * exitPrice >= 0.01) {
+              try {
+                const result = executeOrder(current.portfolio, {
+                  assetId: addr,
+                  side: 'sell',
+                  quantity: timeoutPos.quantity,
+                  priceUsd: exitPrice,
+                  reason: `スキャルプ時間切れ: ${current.scalp.maxHoldMin} 分以内に利確/損切りへ届かず全量手仕舞い（枠を回転）`,
+                  strategy: 'スキャルプ',
+                })
+                current.portfolio = result.portfolio
+                meta.triggered = current.ladderRules.map((_, i) => i)
+              } catch (err) {
+                // 失敗時は triggered を進めない（ゾンビ化防止 — 次ティックで再判定）
+                const { code, message } = formatError(err)
+                console.warn(`[${code}] ${message}`)
+              }
+            } else {
+              // 価格喪失・dust は評価 $0 の帳簿決済としてポジションを除去（デモのため実害なし。
+              // 残すと剪定に乗らず枠が固定化する: ISSUE-P9-L42）
+              current.portfolio = {
+                ...current.portfolio,
+                positions: current.portfolio.positions.filter((p) => p.assetId !== addr),
+              }
+              meta.triggered = current.ladderRules.map((_, i) => i)
+            }
+            continue
+          }
+        }
         if (!token || token.priceUsd <= 0) continue
         const pos = positionOf(current.portfolio, addr)
 
@@ -963,7 +1061,9 @@ export const useSolanaStore = defineStore('solana', {
                 ? '自動スナイプ'
                 : current.method === 'moonbag'
                   ? 'ムーンバッグ'
-                  : 'ラダーロジック'
+                  : current.method === 'scalp'
+                    ? 'スキャルプ'
+                    : 'ラダーロジック'
           const fired = checkLadder(meta.entryPriceUsd, token.priceUsd, current.ladderRules, meta.triggered)
           for (const { index, rule } of fired) {
             const position = positionOf(current.portfolio, addr)
@@ -990,9 +1090,13 @@ export const useSolanaStore = defineStore('solana', {
                 priceUsd: token.priceUsd,
                 reason: isMoonbagTp
                   ? `ムーンバッグ利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% を売却（元本+${Math.round(((1 + rule.triggerPct / 100) * rule.sellRatio - 1) * 100)}% 確定・残りは売却ルールなしで保持）`
-                  : rule.triggerPct >= 0
-                    ? `ラダー利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`
-                    : `ラダー損切り: ${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`,
+                  : current.method === 'scalp'
+                    ? rule.triggerPct >= 0
+                      ? `スキャルプ利確: +${rule.triggerPct}% 到達で全量売却（枠を回転）`
+                      : `スキャルプ損切り: ${rule.triggerPct}% 到達で全量決済`
+                    : rule.triggerPct >= 0
+                      ? `ラダー利確: +${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`
+                      : `ラダー損切り: ${rule.triggerPct}% 到達で ${Math.round(rule.sellRatio * 100)}% 決済`,
                 strategy: strategyName,
               })
               current.portfolio = result.portfolio
